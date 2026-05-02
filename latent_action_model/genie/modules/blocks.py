@@ -372,8 +372,11 @@ class VectorQuantizer(nn.Module):
         self.code_restart = code_restart
 
     def update_usage(self, min_enc) -> None:
-        for idx in min_enc:
-            self.usage[idx] = self.usage[idx] + 1  # Add used code
+        counts = torch.bincount(
+            min_enc.detach().reshape(-1),
+            minlength=self.num_latents,
+        ).to(self.usage)
+        self.usage.add_(counts)
 
     def random_restart(self) -> None:
         if self.code_restart:

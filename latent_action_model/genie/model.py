@@ -97,6 +97,13 @@ class DINO_LAM(LightningModule):
         if self.distributed_state.is_main_process:
             wandb.init(name=task_name, reinit=True)
 
+    def _code_usage(self, indices: Tensor, num_latents: int) -> Tensor:
+        counts = torch.bincount(
+            indices.detach().reshape(-1),
+            minlength=num_latents,
+        )
+        return (counts != 0).float().mean()
+
     def shared_step(self, batch: Dict) -> Tuple:
         # batch: keys['videos', 'task_instruction', 'action', 'dataset_names']
 
@@ -116,11 +123,7 @@ class DINO_LAM(LightningModule):
             commit_loss_uncontrol = ((outputs["emb_uncontrol"]- outputs["z_uncontrol"].detach()) ** 2).mean()
             loss = loss + q_loss_uncontrol + self.vq_beta * commit_loss_uncontrol
 
-        # Compute code usage
-        unique, counts = torch.unique(outputs["indices"], return_counts=True)
-        index_counts = torch.zeros(self.lam_num_latents, dtype=torch.long).cuda()
-        index_counts[unique] = counts
-        code_usage = (index_counts != 0).float().mean()
+        code_usage = self._code_usage(outputs["indices"], self.lam_num_latents)
 
         loss_logs = (
             ("mse_loss", mse_loss),
@@ -130,10 +133,7 @@ class DINO_LAM(LightningModule):
         )
 
         if "indices_uncontrol" in outputs.keys():
-            unique, counts = torch.unique(outputs["indices_uncontrol"], return_counts=True)
-            index_counts = torch.zeros(32, dtype=torch.long).cuda()
-            index_counts[unique] = counts
-            uncontrol_code_usage = (index_counts != 0).float().mean()
+            uncontrol_code_usage = self._code_usage(outputs["indices_uncontrol"], self.lam.vq.num_latents)
 
             loss_logs = (
                 ("mse_loss", mse_loss),
@@ -161,17 +161,18 @@ class DINO_LAM(LightningModule):
 
 
         # Log the training loss
+        logs = {**{"train_loss": loss}, **{f"train/{k}": v for k, v in aux_losses}}
         self.log_dict(
-            {**{"train_loss": loss}, **{f"train/{k}": v for k, v in aux_losses}},
+            logs,
             prog_bar=True,
             logger=True,
             on_step=True,
             on_epoch=True,
-            sync_dist=True
+            sync_dist=False
         )
 
-        if self.distributed_state.is_main_process:
-            wandb.log({**{"train_loss": loss}, **{f"train/{k}": v for k, v in aux_losses}})
+        if self.distributed_state.is_main_process and batch_idx % self.log_interval == 0:
+            wandb.log({k: v.detach().float().cpu().item() for k, v in logs.items()})
 
         return loss
 
