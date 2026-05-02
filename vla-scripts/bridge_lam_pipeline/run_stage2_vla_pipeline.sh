@@ -13,6 +13,7 @@ BASE_VLM="${BASE_VLM:-${ROOT}/data/univla_checkpoints/prismatic-vlms/prism-dinos
 
 RUN_ROOT="${RUN_ROOT:-${ROOT}/outputs/univla_bridge_lam_local}"
 RUN_NOTE="${RUN_NOTE:-bridge_dataset_local_lam_stage2_b200_tf21}"
+LAM_STAGE2_MAX_STEPS="${LAM_STAGE2_MAX_STEPS:-10000}"
 VLA_MAX_STEPS="${VLA_MAX_STEPS:-20000}"
 VLA_MASTER_PORT="${VLA_MASTER_PORT:-28611}"
 WANDB_ENTITY="${WANDB_ENTITY:-joonstack}"
@@ -45,7 +46,7 @@ require_dir() {
 }
 
 run_lam_stage2() {
-  echo "[pipeline] LAM stage2 start: old venv, workers=${UNIVLA_LAM_NUM_WORKERS:-2}"
+  echo "[pipeline] LAM stage2 start: old venv, workers=${UNIVLA_LAM_NUM_WORKERS:-2}, max_steps=${LAM_STAGE2_MAX_STEPS}"
   require_file "${STAGE1_CKPT}"
   require_file "${OLD_VENV}/bin/torchrun"
   require_file "${REPO}/latent_action_model/config/lam-stage-2-bridge.yaml"
@@ -60,7 +61,9 @@ run_lam_stage2() {
 
   rm -f "${REPO}/latent_action_model/config.yaml"
   cd "${REPO}"
-  ./vla-scripts/bridge_lam_pipeline/01_train_lam_stage2_bridge.sh 2>&1 | tee "${LOG_ROOT}/lam_stage2.log"
+  ./vla-scripts/bridge_lam_pipeline/01_train_lam_stage2_bridge.sh \
+    --trainer.max_steps "${LAM_STAGE2_MAX_STEPS}" \
+    2>&1 | tee "${LOG_ROOT}/lam_stage2.log"
 
   require_file "${STAGE2_CKPT}"
   echo "[pipeline] LAM stage2 done: ${STAGE2_CKPT}"
