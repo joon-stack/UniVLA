@@ -16,13 +16,13 @@ MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MAX_STEPS="${MAX_STEPS:-20000}"
 WANDB_ENTITY="${WANDB_ENTITY:-joonstack}"
 WANDB_PROJECT="${WANDB_PROJECT:-univla_bridge_lam_local}"
-RUN_ID_NOTE="${RUN_ID_NOTE:-bridge_orig_local_lam_stage2_b200}"
+RUN_ID_NOTE="${RUN_ID_NOTE:-bridge_dataset_local_lam_stage2_b200}"
 
 mkdir -p "${LOG_DIR}"
 
 test -f "${BASE_VLM}/checkpoints/latest-checkpoint.pt"
 test -f "${LAM_CKPT}"
-test -e "${DATA_ROOT}/bridge_orig/1.0.0/dataset_info.json"
+test -e "${DATA_ROOT}/bridge_dataset/1.0.0/dataset_info.json"
 
 cd "${REPO}"
 
@@ -46,4 +46,3 @@ exec .venv/bin/torchrun \
   vla-scripts/train.py \
   "${ARGS[@]}" \
   2>&1 | tee "${LOG}"
-
