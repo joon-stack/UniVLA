@@ -173,15 +173,15 @@ class PaddedCollatorForLatentActionPrediction:
             initial = torch.stack([instance["initial_lam_pixel_values"] for instance in instances])
             target = torch.stack([instance["target_lam_pixel_values"] for instance in instances])
             device = next(self.latent_action_model.parameters()).device
-            video = torch.stack([initial, target], dim=1).to(device)
-            with torch.no_grad():
+            video = torch.stack([initial, target], dim=1).to(device, non_blocking=True)
+            with torch.inference_mode():
                 latent_action_idx = self.latent_action_model.vq_encode(video)["indices"].view(len(instances), -1)
         else:
             latent_action_idx = torch.zeros((len(instances), 1), dtype=torch.long)
 
         input_ids, labels = [], []
         for instance, action_indices in zip(instances, latent_action_idx.cpu()):
-            action_tokens = "".join(f"<ACT_{idx.item()}>" for idx in action_indices)
+            action_tokens = "".join(f"<ACT_{idx}>" for idx in action_indices.tolist())
             prompt_builder = self.prompt_builder_fn("openvla")
             conversation = [
                 {"from": "human", "value": f"What action should the robot take to {instance['lang']}?"},

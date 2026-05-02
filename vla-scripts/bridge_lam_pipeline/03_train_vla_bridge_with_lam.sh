@@ -23,6 +23,14 @@ RUN_ID_NOTE="${RUN_ID_NOTE:-bridge_dataset_local_lam_stage2_b200}"
 
 mkdir -p "${LOG_DIR}"
 
+export OMP_NUM_THREADS="${OMP_NUM_THREADS:-8}"
+export UNIVLA_TRAJ_THREADS="${UNIVLA_TRAJ_THREADS:-4}"
+export UNIVLA_TRAJ_READ_THREADS="${UNIVLA_TRAJ_READ_THREADS:-4}"
+export UNIVLA_FRAME_THREADS="${UNIVLA_FRAME_THREADS:-8}"
+export UNIVLA_TF_RAM_BUDGET_MB="${UNIVLA_TF_RAM_BUDGET_MB:-512}"
+export UNIVLA_PROFILE_STEPS="${UNIVLA_PROFILE_STEPS:-0}"
+export UNIVLA_DUMMY_LATENT_ACTIONS="${UNIVLA_DUMMY_LATENT_ACTIONS:-0}"
+
 test -f "${BASE_VLM}/checkpoints/latest-checkpoint.pt"
 test -f "${LAM_CKPT}"
 test -e "${DATA_ROOT}/bridge_dataset/1.0.0/dataset_info.json"
