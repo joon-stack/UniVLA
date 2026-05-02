@@ -1,4 +1,5 @@
 import math
+import os
 from os import listdir, makedirs, path
 from random import choices, randint
 from typing import Any, Callable, Dict
@@ -96,7 +97,9 @@ class LightningDataset(LightningDataModule):
             # shuffle=self.train_shuffle,
             collate_fn=self.collate_fn,
             num_workers=self.num_workers,
-            worker_init_fn=worker_init_fn
+            worker_init_fn=worker_init_fn,
+            persistent_workers=self.num_workers > 0,
+            prefetch_factor=int(os.environ.get("UNIVLA_LAM_PREFETCH_FACTOR", "2")) if self.num_workers > 0 else None,
         )
 
     def val_dataloader(self) -> DataLoader:
@@ -111,7 +114,9 @@ class LightningDataset(LightningDataModule):
             # shuffle=self.val_shuffle,
             collate_fn=self.collate_fn,
             num_workers=self.num_workers,
-            worker_init_fn=worker_init_fn
+            worker_init_fn=worker_init_fn,
+            persistent_workers=self.num_workers > 0,
+            prefetch_factor=int(os.environ.get("UNIVLA_LAM_PREFETCH_FACTOR", "2")) if self.num_workers > 0 else None,
         )
 
     def test_dataloader(self) -> DataLoader:
@@ -126,7 +131,9 @@ class LightningDataset(LightningDataModule):
             # shuffle=self.val_shuffle,
             collate_fn=self.collate_fn,
             num_workers=self.num_workers,
-            worker_init_fn=worker_init_fn
+            worker_init_fn=worker_init_fn,
+            persistent_workers=self.num_workers > 0,
+            prefetch_factor=int(os.environ.get("UNIVLA_LAM_PREFETCH_FACTOR", "2")) if self.num_workers > 0 else None,
         )
 
 
@@ -194,7 +201,7 @@ class LightningOpenX(LightningDataset):
         self.shuffle_buffer_size = shuffle_buffer_size
         self.image_aug = image_aug
 
-        self.num_workers = 0    # Important =>> Set to 0 if using RLDS; TFDS rolls its own parallelism!
+        self.num_workers = int(os.environ.get("UNIVLA_LAM_NUM_WORKERS", "0"))
         self.worker_init_fn = set_global_seed(42, get_worker_init_fn=True)
 
         self.batch_transform = RLDSBatchTransformVideo(
@@ -240,5 +247,4 @@ class LightningOpenX(LightningDataset):
             )
         else:
             raise ValueError(f"Invalid stage: {stage}")
-
 

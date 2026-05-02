@@ -14,7 +14,7 @@ import random
 import numpy as np
 import torch
 from PIL import Image
-from torch.utils.data import Dataset, IterableDataset
+from torch.utils.data import Dataset, IterableDataset, get_worker_info
 from transformers import PreTrainedTokenizerBase
 
 from prismatic.models.backbones.llm.prompting import PromptBuilder
@@ -407,7 +407,11 @@ class RLDSDataset(IterableDataset):
         return make_interleaved_dataset(**rlds_config)
 
     def __iter__(self) -> Dict[str, Any]:
-        for rlds_batch in self.dataset.as_numpy_iterator():
+        dataset = self.dataset
+        worker_info = get_worker_info()
+        if worker_info is not None:
+            dataset = dataset.shard(worker_info.num_workers, worker_info.id)
+        for rlds_batch in dataset.as_numpy_iterator():
             yield self.batch_transform(rlds_batch)
 
     def __len__(self) -> int:
@@ -433,7 +437,11 @@ class EpisodicRLDSDataset(RLDSDataset):
         )
 
     def __iter__(self) -> Dict[str, Any]:
-        for rlds_batch in self.dataset.as_numpy_iterator():
+        dataset = self.dataset
+        worker_info = get_worker_info()
+        if worker_info is not None:
+            dataset = dataset.shard(worker_info.num_workers, worker_info.id)
+        for rlds_batch in dataset.as_numpy_iterator():
             out = [
                 self.batch_transform(tree_map(lambda x: x[i], rlds_batch))  # noqa: B023
                 for i in range(rlds_batch["action"].shape[0])

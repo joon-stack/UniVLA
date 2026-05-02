@@ -7,6 +7,7 @@ Core interface script for configuring and initializing RLDS datasets.
 import copy
 import inspect
 import json
+import os
 import random
 from functools import partial
 from typing import Callable, Dict, List, Optional, Tuple, Union
@@ -486,7 +487,9 @@ def make_single_dataset(
     dataset = apply_frame_transforms(dataset, **frame_transform_kwargs, train=train)
 
     # this seems to reduce memory usage without affecting speed
-    dataset = dataset.with_ram_budget(1)
+    ram_budget_mb = int(os.environ.get("UNIVLA_TF_RAM_BUDGET_MB", "1"))
+    if ram_budget_mb > 0:
+        dataset = dataset.with_ram_budget(ram_budget_mb)
 
     # save for later
     return dataset, dataset_statistics["num_trajectories"], dataset_statistics
@@ -623,7 +626,9 @@ def make_interleaved_dataset(
         dataset = dataset.batch(batch_size)
 
     # Note =>> Seems to reduce memory usage without affecting speed?
-    dataset = dataset.with_ram_budget(1)
+    ram_budget_mb = int(os.environ.get("UNIVLA_TF_RAM_BUDGET_MB", "1"))
+    if ram_budget_mb > 0:
+        dataset = dataset.with_ram_budget(ram_budget_mb)
 
     # Save for Later
     dataset.sample_weights = sample_weights
