@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple, Type
 
+import os
 import random
 import numpy as np
 import torch
@@ -237,11 +238,14 @@ class RLDSBatchTransformLatentAction:
         img_k = Image.fromarray(rlds_batch["observation"]["image_primary"][-1])
         pixel_values = self.image_transform(img)
 
-        with torch.no_grad():
-            initial_pixel_values = self.image_transform_lam(img)
-            target_pixel_values = self.image_transform_lam(img_k)
-            video = torch.stack([initial_pixel_values, target_pixel_values], dim=0).unsqueeze(0).to(self.action_tokenizer.device)
-            latent_action_idx = self.action_tokenizer.vq_encode(video)['indices'].squeeze()
+        if os.environ.get("UNIVLA_DUMMY_LATENT_ACTIONS", "0") == "1":
+            latent_action_idx = torch.zeros(1, dtype=torch.long)
+        else:
+            with torch.no_grad():
+                initial_pixel_values = self.image_transform_lam(img)
+                target_pixel_values = self.image_transform_lam(img_k)
+                video = torch.stack([initial_pixel_values, target_pixel_values], dim=0).unsqueeze(0).to(self.action_tokenizer.device)
+                latent_action_idx = self.action_tokenizer.vq_encode(video)['indices'].squeeze()
 
         action_vocab = [f'<ACT_{i.item()}>' for i in latent_action_idx]   # [ACT_1, ACT_2, ... ACT_K]
 
