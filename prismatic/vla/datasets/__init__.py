@@ -1,6 +1,5 @@
 from .datasets import DummyDataset, EpisodicRLDSDataset, RLDSBatchTransform, \
-                      RLDSDataset, RLDSBatchTransformVideo, RLDSBatchTransformLatentAction,\
-                      RLDSBatchTransformLatentActionDeferred, RLDSBatchTransformLatentActionCached, \
+                      RLDSDataset, RLDSBatchTransformVideo, RLDSBatchTransformLatentAction, \
                       RLDSBatchTransformLIBERO, \
                       RLDSBatchTransformLIBERO_withHis
 from .calvin_dataset import DiskCalvinDataset

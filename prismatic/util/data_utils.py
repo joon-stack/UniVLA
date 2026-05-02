@@ -5,10 +5,8 @@ General utilities and classes for facilitating data loading and collation.
 """
 import re
 import string
-import os
-import time
 from dataclasses import dataclass
-from typing import Callable, Dict, Sequence, Tuple, Any
+from typing import Callable, Dict, Sequence, Tuple
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -142,95 +140,6 @@ class PaddedCollatorForActionPrediction:
         )
         if dataset_names is not None:
             output["dataset_names"] = dataset_names
-        return output
-
-
-@dataclass
-class PaddedCollatorForLatentActionPrediction:
-    model_max_length: int
-    pad_token_id: int
-    action_tokenizer: Any
-    base_tokenizer: Any
-    prompt_builder_fn: Any
-    padding_side: str = "right"
-    predict_stop_token: bool = True
-    pixel_values_dtype: torch.dtype = torch.float32
-
-    def __call__(self, instances: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
-        pixel_values = [instance["pixel_values"] for instance in instances]
-        instructions = [instance["lang"] for instance in instances]
-
-        if "dataset_name" in instances[0]:
-            dataset_names = [instance["dataset_name"] for instance in instances]
-        else:
-            dataset_names = None
-
-        assert self.padding_side == "right", f"Invalid Tokenizer `{self.padding_side = }`"
-        assert all([pv is not None for pv in pixel_values]), "Invalid VLA Example with `pixel_values = None`!"
-
-        if isinstance(pixel_values[0], torch.Tensor):
-            pixel_values = torch.stack(pixel_values)
-        elif isinstance(pixel_values[0], dict):
-            pixel_values = {
-                k: torch.stack([pixel_values[idx][k] for idx in range(len(instances))]) for k in pixel_values[0]
-            }
-        else:
-            raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
-
-        if "latent_action_idx" in instances[0]:
-            latent_action_idx = torch.stack([instance["latent_action_idx"] for instance in instances])
-            lam_vq_s = 0.0
-        else:
-            initial_pixel_values = torch.stack([instance["initial_pixel_values"] for instance in instances])
-            target_pixel_values = torch.stack([instance["target_pixel_values"] for instance in instances])
-            # Batch the LAM forward pass. The old path ran vq_encode once per sample,
-            # which made VLA training spend most of each step in Python/input plumbing.
-            with torch.no_grad():
-                lam_start = time.perf_counter()
-                video = torch.stack([initial_pixel_values, target_pixel_values], dim=1).to(self.action_tokenizer.device)
-                latent_action_idx = self.action_tokenizer.vq_encode(video)["indices"]
-                latent_action_idx = latent_action_idx.reshape(len(instances), -1).detach().cpu()
-                lam_vq_s = time.perf_counter() - lam_start
-
-        input_ids, labels = [], []
-        for lang, action_indices in zip(instructions, latent_action_idx):
-            action_vocab = [f"<ACT_{int(i)}>" for i in action_indices]
-            action_tokens = "".join(action_vocab)
-
-            prompt_builder = self.prompt_builder_fn("openvla")
-            conversation = [
-                {"from": "human", "value": f"What action should the robot take to {lang}?"},
-                {"from": "gpt", "value": action_tokens},
-            ]
-            for turn in conversation:
-                prompt_builder.add_turn(turn["from"], turn["value"])
-
-            ids = self.base_tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
-            label = list(ids)
-            prefix_len = len(label) - (len(action_vocab) + 1)
-            if prefix_len > 0:
-                label[:prefix_len] = [IGNORE_INDEX] * prefix_len
-            if not self.predict_stop_token:
-                label[-1] = IGNORE_INDEX
-
-            input_ids.append(torch.tensor(ids))
-            labels.append(torch.tensor(label))
-
-        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.pad_token_id)
-        labels = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
-        input_ids, labels = input_ids[:, : self.model_max_length], labels[:, : self.model_max_length]
-        attention_mask = input_ids.ne(self.pad_token_id)
-
-        output = dict(
-            pixel_values=pixel_values,
-            input_ids=input_ids,
-            attention_mask=attention_mask,
-            labels=labels,
-        )
-        if dataset_names is not None:
-            output["dataset_names"] = dataset_names
-        if os.getenv("UNIVLA_PROFILE_STEPS"):
-            output["profile_lam_vq_s"] = lam_vq_s
         return output
 
 

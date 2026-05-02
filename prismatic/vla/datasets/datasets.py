@@ -5,8 +5,6 @@ Lightweight PyTorch Dataset Definition for wrapping RLDS TFDS Pipeline; just def
 format to OpenVLA, IterableDataset shim.
 """
 
-import hashlib
-import sqlite3
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Tuple, Type
@@ -28,19 +26,6 @@ from prismatic.vla.datasets.rlds.utils.data_utils import NormalizationType
 
 # HuggingFace Default / LLaMa-2 IGNORE_INDEX (for labels)
 IGNORE_INDEX = -100
-
-
-def bridge_latent_cache_key(dataset_name: Any, lang: str, initial_image: np.ndarray, target_image: np.ndarray) -> str:
-    dataset = dataset_name.decode() if isinstance(dataset_name, bytes) else str(dataset_name)
-    h = hashlib.blake2b(digest_size=20)
-    h.update(dataset.encode("utf-8"))
-    h.update(b"\0")
-    h.update(lang.encode("utf-8"))
-    h.update(b"\0")
-    h.update(np.ascontiguousarray(initial_image).tobytes())
-    h.update(b"\0")
-    h.update(np.ascontiguousarray(target_image).tobytes())
-    return h.hexdigest()
 
 # From 3Hz to 5Hz control frequency
 datasets_with_lower_frequency = ['fractal20220817_data', 'toto', 'berkeley_autolab_ur5', 
@@ -290,66 +275,6 @@ class RLDSBatchTransformLatentAction:
 
 
         return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name)
-
-
-
-
-@dataclass
-class RLDSBatchTransformLatentActionDeferred:
-    image_transform: ImageTransform
-    image_transform_lam: ImageTransform
-
-    def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert RLDS frame data while deferring LAM tokenization to the collator."""
-        dataset_name = rlds_batch["dataset_name"]
-        lang = rlds_batch["task"]["language_instruction"].decode().lower()
-
-        img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
-        img_k = Image.fromarray(rlds_batch["observation"]["image_primary"][-1])
-
-        return dict(
-            pixel_values=self.image_transform(img),
-            initial_pixel_values=self.image_transform_lam(img),
-            target_pixel_values=self.image_transform_lam(img_k),
-            lang=lang,
-            dataset_name=dataset_name,
-        )
-
-
-@dataclass
-class RLDSBatchTransformLatentActionCached:
-    image_transform: ImageTransform
-    latent_action_cache_path: Path
-
-    def __post_init__(self) -> None:
-        self._conn = None
-
-    @property
-    def conn(self):
-        if self._conn is None:
-            self._conn = sqlite3.connect(f"file:{self.latent_action_cache_path}?mode=ro", uri=True)
-        return self._conn
-
-    def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
-        """Convert RLDS frame data and load precomputed LAM codes from SQLite."""
-        dataset_name = rlds_batch["dataset_name"]
-        lang = rlds_batch["task"]["language_instruction"].decode().lower()
-        initial_arr = rlds_batch["observation"]["image_primary"][0]
-        target_arr = rlds_batch["observation"]["image_primary"][-1]
-        cache_key = bridge_latent_cache_key(dataset_name, lang, initial_arr, target_arr)
-        row = self.conn.execute("SELECT indices FROM latent_actions WHERE cache_key = ?", (cache_key,)).fetchone()
-        if row is None:
-            raise KeyError(f"Missing latent action cache entry for key={cache_key}")
-
-        latent_action_idx = torch.tensor([int(x) for x in row[0].split(",")], dtype=torch.long)
-        return dict(
-            pixel_values=self.image_transform(Image.fromarray(initial_arr)),
-            latent_action_idx=latent_action_idx,
-            lang=lang,
-            dataset_name=dataset_name,
-        )
-
-
 @dataclass
 class RLDSBatchTransformVideo:
     image_transform: ImageTransform

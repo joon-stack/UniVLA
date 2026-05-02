@@ -13,13 +13,12 @@ from transformers import PreTrainedTokenizerBase
 
 from prismatic.models.backbones.llm.prompting import PromptBuilder
 from prismatic.models.backbones.vision import ImageTransform
-from prismatic.util.data_utils import PaddedCollatorForActionPrediction, PaddedCollatorForLatentActionPrediction
+from prismatic.util.data_utils import PaddedCollatorForActionPrediction
 from prismatic.vla.action_tokenizer import ActionTokenizer
 from prismatic.vla.datasets import (
     EpisodicRLDSDataset,
     RLDSBatchTransform,
-    RLDSBatchTransformLatentActionCached,
-    RLDSBatchTransformLatentActionDeferred,
+    RLDSBatchTransformLatentAction,
     RLDSDataset,
 )
 
@@ -77,30 +76,20 @@ def get_latent_vla_dataset_and_collator(
     train: bool = True,
     episodic: bool = False,
     image_aug: bool = False,
-    latent_action_cache_path: Path | None = None,
 ) -> Tuple[Dataset, ActionTokenizer, PaddedCollatorForActionPrediction]:
     """Initialize RLDS Dataset (wraps TFDS), ActionTokenizer, and initialize transform/collation functions."""
     # action_tokenizer = ActionTokenizer(tokenizer)
 
-    if latent_action_cache_path is None:
-        batch_transform = RLDSBatchTransformLatentActionDeferred(
-            image_transform=image_transform,
-            image_transform_lam=image_transform_lam,
-        )
-    else:
-        batch_transform = RLDSBatchTransformLatentActionCached(
-            image_transform=image_transform,
-            latent_action_cache_path=latent_action_cache_path,
-        )
-
-    collator = PaddedCollatorForLatentActionPrediction(
-        tokenizer.model_max_length,
-        tokenizer.pad_token_id,
+    batch_transform = RLDSBatchTransformLatentAction(
         action_tokenizer=latent_action_tokenizer,
         base_tokenizer=tokenizer,
+        image_transform=image_transform,
+        image_transform_lam=image_transform_lam,
         prompt_builder_fn=prompt_builder_fn,
-        padding_side=padding_side,
         predict_stop_token=predict_stop_token,
+    )
+    collator = PaddedCollatorForActionPrediction(
+        tokenizer.model_max_length, tokenizer.pad_token_id, padding_side=padding_side
     )
 
 
