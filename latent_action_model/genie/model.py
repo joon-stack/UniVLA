@@ -206,10 +206,14 @@ class DINO_LAM(LightningModule):
     def on_train_batch_end(self, outputs: Tensor, batch: Dict, batch_idx: int) -> None:
         if not self._profile_steps:
             return
-        if torch.cuda.is_available():
-            torch.cuda.synchronize()
-        now = time.perf_counter()
-        if batch_idx < self._profile_steps and self.distributed_state.is_main_process:
+        if batch_idx < self._profile_steps:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            now = time.perf_counter()
+            if not self.distributed_state.is_main_process:
+                self._profile_prev_batch_end = now
+                self._profile_active_batch = False
+                return
             total = now - self._profile_batch_start if self._profile_batch_start is not None else 0.0
             print(
                 "LAM_PROFILE "
@@ -220,7 +224,7 @@ class DINO_LAM(LightningModule):
                 f"total={total:.3f}s",
                 flush=True,
             )
-        self._profile_prev_batch_end = now
+            self._profile_prev_batch_end = now
         self._profile_active_batch = False
 
 
