@@ -616,6 +616,7 @@ def make_interleaved_dataset(
     # Apply Frame Transforms
     overwatch.info("Applying frame transforms on dataset...")
     dataset = apply_frame_transforms(dataset, **frame_transform_kwargs, train=train)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
 
     # [Contract] When training VLA Policies, we let the Collator handle Batching!
     if batch_size is not None:

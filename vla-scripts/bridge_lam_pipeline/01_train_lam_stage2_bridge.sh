@@ -18,6 +18,9 @@ export HF_HOME="${HF_HOME:-${ROOT}/data/hf_cache}"
 export WANDB_PROJECT="${WANDB_PROJECT:-univla_lam_bridge}"
 export WANDB_NAME="${WANDB_NAME:-lam_stage2_bridge_8xb200}"
 export PYTHONPATH="${REPO}:${REPO}/latent_action_model:${PYTHONPATH:-}"
+export UNIVLA_TRAJ_THREADS="${UNIVLA_TRAJ_THREADS:-4}"
+export UNIVLA_TRAJ_READ_THREADS="${UNIVLA_TRAJ_READ_THREADS:-4}"
+export UNIVLA_FRAME_THREADS="${UNIVLA_FRAME_THREADS:-8}"
 
 cd "${REPO}/latent_action_model"
 

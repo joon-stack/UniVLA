@@ -370,14 +370,14 @@ class RLDSDataset(IterableDataset):
             ),
             frame_transform_kwargs=dict(
                 resize_size=resize_resolution,
-                num_parallel_calls=8,                          # For CPU-intensive ops (decoding, resizing, etc.)
+                num_parallel_calls=int(os.environ.get("UNIVLA_FRAME_THREADS", "8")),
             ),
             dataset_kwargs_list=per_dataset_kwargs,
             shuffle_buffer_size=shuffle_buffer_size,
             sample_weights=weights,
             balance_weights=True,
-            traj_transform_threads=len(mixture_spec),
-            traj_read_threads=len(mixture_spec),
+            traj_transform_threads=int(os.environ.get("UNIVLA_TRAJ_THREADS", str(len(mixture_spec)))),
+            traj_read_threads=int(os.environ.get("UNIVLA_TRAJ_READ_THREADS", str(len(mixture_spec)))),
             train=train,
             training_phase=training_phase,
         )
