@@ -50,14 +50,11 @@ def decode_and_resize(
     """Decodes images and depth images, and then optionally resizes them."""
     image_names = {key[6:] for key in obs if key.startswith("image_")}
     depth_names = {key[6:] for key in obs if key.startswith("depth_")}
-    print('image_names', image_names)
-    # print('depth_names', depth_names)
     if isinstance(resize_size, tuple):
         resize_size = {name: resize_size for name in image_names}
     if isinstance(depth_resize_size, tuple):
         depth_resize_size = {name: depth_resize_size for name in depth_names}
 
-    print('keys', obs.keys())
     for name in image_names:
         if name not in resize_size:
             logging.warning(

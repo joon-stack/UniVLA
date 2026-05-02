@@ -11,8 +11,8 @@ from typing import Dict, List, Tuple
 OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
     # === Bridge V2 Dataset ===
     "bridge": [
-        ("bridge_oxe", 1.0),                                      # Version of Bridge V2 in Open-X GCP Bucket
-        # ("bridge_orig", 1.0),                                   # Original Version of Bridge V2 from Project Website
+        # ("bridge_oxe", 1.0),                                    # Version of Bridge V2 in Open-X GCP Bucket
+        ("bridge_orig", 1.0),                                     # Original Version of Bridge V2 from Project Website
     ],
 
     "droid": [

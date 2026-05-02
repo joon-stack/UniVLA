@@ -10,7 +10,7 @@ authors = [
 description = "UniVLA: Learning to Act Anywhere with Task-centric Latent Actions"
 version = "1.0.0"
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
 keywords = ["robotic manipulation", "vision-language-action models", "latent action"]
 license = {file = "LICENSE"}
 classifiers = [
@@ -30,6 +30,7 @@ classifiers = [
 dependencies = [
     "absl_py==2.1.0",
     "accelerate==0.32.1",
+    "braceexpand==0.1.7",
     "dlimp @ git+https://github.com/moojink/dlimp_openvla",
     "draccus==0.8.0",
     "einops==0.8.1",
@@ -65,7 +66,8 @@ dependencies = [
     "timm==0.9.10",
     "tokenizers==0.19.1",
     "tqdm==4.66.4",
-    "transformers==4.40.1"
+    "transformers==4.40.1",
+    "webdataset==0.2.111",
 ]
 
 [project.optional-dependencies]

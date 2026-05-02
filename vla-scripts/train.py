@@ -37,6 +37,7 @@ class TrainConfig:
     )
     pretrain_vlm: str = '/path/to/your/prism-dinosiglip-224px_7b'
     lam_path: str = "latent_action_model/logs/task_centric_lam_stage2/epoch=0-step=200000.ckpt"
+    latent_action_cache_path: Optional[Path] = None
 
     # LAM setting
     codebook_size: int = 16
@@ -183,27 +184,31 @@ def train(cfg: TrainConfig) -> None:
         f"# Parameters (in millions): {num_params / 10**6:.3f} Total, {num_trainable_params / 10**6:.3f} Trainable"
     )
     
-    from latent_action_model.genie.modules.lam import ControllableDINOLatentActionModel
+    latent_action_model = None
+    if cfg.latent_action_cache_path is None:
+        from latent_action_model.genie.modules.lam import ControllableDINOLatentActionModel
 
-    latent_action_model = ControllableDINOLatentActionModel(
-        in_dim=3,
-        model_dim=cfg.lam_model_dim,
-        latent_dim=cfg.lam_latent_dim,
-        num_latents=cfg.codebook_size,
-        patch_size=cfg.lam_patch_size,
-        enc_blocks=cfg.lam_enc_blocks,
-        dec_blocks=cfg.lam_dec_blocks,
-        num_heads=cfg.lam_num_heads,
-        dropout=0.,
-    )
+        latent_action_model = ControllableDINOLatentActionModel(
+            in_dim=3,
+            model_dim=cfg.lam_model_dim,
+            latent_dim=cfg.lam_latent_dim,
+            num_latents=cfg.codebook_size,
+            patch_size=cfg.lam_patch_size,
+            enc_blocks=cfg.lam_enc_blocks,
+            dec_blocks=cfg.lam_dec_blocks,
+            num_heads=cfg.lam_num_heads,
+            dropout=0.,
+        )
 
-    lam_ckpt = torch.load(cfg.lam_path)['state_dict']
-    new_ckpt = {}
-    for key in lam_ckpt.keys():
-        new_ckpt[key.replace("lam.", "")] = lam_ckpt[key]
+        lam_ckpt = torch.load(cfg.lam_path)['state_dict']
+        new_ckpt = {}
+        for key in lam_ckpt.keys():
+            new_ckpt[key.replace("lam.", "")] = lam_ckpt[key]
 
-    latent_action_model.load_state_dict(new_ckpt, strict=True)
-    latent_action_model = latent_action_model.to(device_id).eval()
+        latent_action_model.load_state_dict(new_ckpt, strict=True)
+        latent_action_model = latent_action_model.to(device_id).eval()
+    else:
+        overwatch.info(f"Using cached latent action labels from `{cfg.latent_action_cache_path}`")
 
     # Get VLA Dataset & Collator
     overwatch.info(f"Creating VLA Open-X Dataset with Mixture `{cfg.vla.data_mix}`")
@@ -218,6 +223,7 @@ def train(cfg: TrainConfig) -> None:
         default_image_resolution=vlm.vision_backbone.default_image_resolution,
         shuffle_buffer_size=cfg.vla.shuffle_buffer_size,
         image_aug=cfg.image_aug,
+        latent_action_cache_path=cfg.latent_action_cache_path,
     )
 
     special_tokens_dict = {'additional_special_tokens': [f'<ACT_{i}>' for i in range(cfg.codebook_size)]}

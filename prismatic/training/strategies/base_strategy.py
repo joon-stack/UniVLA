@@ -9,7 +9,9 @@ heavy lifting.
 """
 
 from abc import ABC, abstractmethod
+import os
 from pathlib import Path
+import time
 from typing import Callable, Optional
 
 import torch
@@ -281,7 +283,12 @@ class TrainingStrategy(ABC):
             # [Contract] DataLoader wraps RLDS Loader (`.as_numpy_iterator() =>> implicit `.repeat()`)
             #   => This means looping over the DataLoader is basically "infinite" (so no outer loop over epochs).
             #      Slightly breaks default PyTorch semantics, which is why we adaptively compute `epoch` below.
+            profile_steps = int(os.getenv("UNIVLA_PROFILE_STEPS", "0") or 0)
+            last_step_end = time.perf_counter()
             for batch in dataloader:
+                step_start = time.perf_counter()
+                data_s = step_start - last_step_end
+                forward_start = time.perf_counter()
                 # Note that we'll unpack batch (and let AMP/FSDP do its thing) in the VLM.forward() call
                 #   => Basically, if we're using mixed precision (or not), autocast()/FSDP will move to device!
                 with torch.autocast(
@@ -295,12 +302,16 @@ class TrainingStrategy(ABC):
                         labels=batch["labels"],
                     )
                     loss = output.loss
+                forward_s = time.perf_counter() - forward_start
 
                 # Commit Loss =>> Backward!
                 metrics.commit(loss=loss)
+                backward_start = time.perf_counter()
                 loss.backward()
+                backward_s = time.perf_counter() - backward_start
 
                 # === Compute Action Token Accuracy & L1 Loss ===
+                metric_start = time.perf_counter()
 
                 # To compute action token accuracy, we need to identify the locations of the action tokens
                 # in both `output.logits` and `batch["labels"]`. We know that when "right" padding, we
@@ -358,8 +369,10 @@ class TrainingStrategy(ABC):
                             metrics.commit_for_dataset(
                                 dataset_name=ds.decode(), action_accuracy=action_accuracy_ds, l1_loss=action_l1_loss_ds
                             )
+                metric_s = time.perf_counter() - metric_start
 
                 # === Gradient Step ===
+                optim_start = time.perf_counter()
 
                 # Clip Gradients --> this is custom, per-strategy because of DDP vs. FSDP locality assumptions
                 self.clip_grad_norm()
@@ -368,6 +381,7 @@ class TrainingStrategy(ABC):
                 self.optimizer.step()
                 self.lr_scheduler.step()
                 self.optimizer.zero_grad()
+                optim_s = time.perf_counter() - optim_start
 
                 # Compute epoch value using number of completed gradient steps
                 epoch = (metrics.global_step + 1) // (len(vla_dataset) // self.global_batch_size)
@@ -375,6 +389,22 @@ class TrainingStrategy(ABC):
                 # Push Metrics
                 metrics.commit(global_step=metrics.global_step + 1, epoch=epoch, lr=self.lr_scheduler.get_last_lr()[0])
                 status = metrics.push()
+                if profile_steps and overwatch.is_rank_zero() and metrics.global_step <= profile_steps:
+                    total_s = time.perf_counter() - step_start
+                    lam_vq_s = batch.get("profile_lam_vq_s", 0.0)
+                    overwatch.info(
+                        "UNIVLA_PROFILE step=%s data_collate=%.3fs lam_vq=%.3fs forward=%.3fs backward=%.3fs "
+                        "metrics=%.3fs optim=%.3fs total_after_data=%.3fs",
+                        metrics.global_step,
+                        data_s,
+                        lam_vq_s,
+                        forward_s,
+                        backward_s,
+                        metric_s,
+                        optim_s,
+                        total_s,
+                    )
+                last_step_end = time.perf_counter()
 
                 # Check for Save Interval or Max Steps & Save Checkpoint
                 if (terminate := (self.max_steps is not None and metrics.global_step >= self.max_steps)) or (
@@ -434,9 +464,15 @@ class TrainingStrategy(ABC):
             # [Contract] DataLoader wraps RLDS Loader (`.as_numpy_iterator() =>> implicit `.repeat()`)
             #   => This means looping over the DataLoader is basically "infinite" (so no outer loop over epochs).
             #      Slightly breaks default PyTorch semantics, which is why we adaptively compute `epoch` below.
-            for batch in dataloader:
+            profile_steps = int(os.getenv("UNIVLA_PROFILE_STEPS", "0"))
+            data_iter = iter(dataloader)
+            while True:
+                step_start = time.perf_counter()
+                batch = next(data_iter)
+                data_s = time.perf_counter() - step_start
                 # Note that we'll unpack batch (and let AMP/FSDP do its thing) in the VLM.forward() call
                 #   => Basically, if we're using mixed precision (or not), autocast()/FSDP will move to device!
+                forward_start = time.perf_counter()
                 with torch.autocast(
                     "cuda", dtype=self.mixed_precision_dtype, enabled=self.enable_mixed_precision_training
                 ):
@@ -448,12 +484,16 @@ class TrainingStrategy(ABC):
                         labels=batch["labels"],
                     )
                     loss = output.loss
+                forward_s = time.perf_counter() - forward_start
 
                 # Commit Loss =>> Backward!
                 metrics.commit(loss=loss)
+                backward_start = time.perf_counter()
                 loss.backward()
+                backward_s = time.perf_counter() - backward_start
 
                 # === Compute Action Token Accuracy & L1 Loss ===
+                metrics_start = time.perf_counter()
 
                 # To compute action token accuracy, we need to identify the locations of the action tokens
                 # in both `output.logits` and `batch["labels"]`. We know that when "right" padding, we
@@ -488,6 +528,7 @@ class TrainingStrategy(ABC):
                 action_l1_loss = torch.tensor(0.)
                 # Commit Metrics
                 metrics.commit(action_accuracy=action_accuracy, l1_loss=action_l1_loss, update_step_time=True)
+                metric_s = time.perf_counter() - metrics_start
 
                 # Compute metrics per dataset --> only on rank_zero since we don't log them on other workers anyways
                 if overwatch.is_rank_zero():
@@ -517,12 +558,14 @@ class TrainingStrategy(ABC):
                 # === Gradient Step ===
 
                 # Clip Gradients --> this is custom, per-strategy because of DDP vs. FSDP locality assumptions
+                optim_start = time.perf_counter()
                 self.clip_grad_norm()
 
                 # Optimizer & LR Scheduler Step
                 self.optimizer.step()
                 self.lr_scheduler.step()
                 self.optimizer.zero_grad()
+                optim_s = time.perf_counter() - optim_start
 
                 # Compute epoch value using number of completed gradient steps
                 epoch = (metrics.global_step + 1) // (len(vla_dataset) // self.global_batch_size)
@@ -530,6 +573,15 @@ class TrainingStrategy(ABC):
                 # Push Metrics
                 metrics.commit(global_step=metrics.global_step + 1, epoch=epoch, lr=self.lr_scheduler.get_last_lr()[0])
                 status = metrics.push()
+                if profile_steps and metrics.global_step <= profile_steps:
+                    lam_s = batch.get("profile_lam_vq_s", None)
+                    lam_msg = f", lam_vq={lam_s:.3f}s" if lam_s is not None else ""
+                    print(
+                        f"[univla-profile rank={overwatch.rank()} step={metrics.global_step}] "
+                        f"data+collate={data_s:.3f}s{lam_msg}, forward={forward_s:.3f}s, "
+                        f"backward={backward_s:.3f}s, metrics={metric_s:.3f}s, optim={optim_s:.3f}s",
+                        flush=True,
+                    )
 
                 # Check for Save Interval or Max Steps & Save Checkpoint
                 if (terminate := (self.max_steps is not None and metrics.global_step >= self.max_steps)) or (
