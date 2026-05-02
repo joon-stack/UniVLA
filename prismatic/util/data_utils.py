@@ -6,6 +6,7 @@ General utilities and classes for facilitating data loading and collation.
 import re
 import string
 import os
+import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Sequence, Tuple
 
@@ -155,6 +156,8 @@ class PaddedCollatorForLatentActionPrediction:
     predict_stop_token: bool = True
 
     def __call__(self, instances: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        profile_steps = int(os.environ.get("UNIVLA_PROFILE_STEPS", "0"))
+        profile_start = time.perf_counter() if profile_steps > 0 else None
         pixel_values = [instance["pixel_values"] for instance in instances]
         dataset_names = [instance["dataset_name"] for instance in instances]
 
@@ -166,6 +169,7 @@ class PaddedCollatorForLatentActionPrediction:
             }
         else:
             raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
+        profile_pixel_done = time.perf_counter() if profile_steps > 0 else None
 
         if os.environ.get("UNIVLA_DUMMY_LATENT_ACTIONS", "0") == "1":
             latent_action_idx = torch.zeros((len(instances), 1), dtype=torch.long)
@@ -178,6 +182,7 @@ class PaddedCollatorForLatentActionPrediction:
                 latent_action_idx = self.latent_action_model.vq_encode(video)["indices"].view(len(instances), -1)
         else:
             latent_action_idx = torch.zeros((len(instances), 1), dtype=torch.long)
+        profile_lam_done = time.perf_counter() if profile_steps > 0 else None
 
         input_ids, labels = [], []
         for instance, action_indices in zip(instances, latent_action_idx.cpu()):
@@ -198,6 +203,7 @@ class PaddedCollatorForLatentActionPrediction:
                 cur_labels[-1] = IGNORE_INDEX
             input_ids.append(cur_input_ids)
             labels.append(cur_labels)
+        profile_token_done = time.perf_counter() if profile_steps > 0 else None
 
         assert self.padding_side == "right", f"Invalid Tokenizer `{self.padding_side = }`"
         input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.pad_token_id)
@@ -205,13 +211,23 @@ class PaddedCollatorForLatentActionPrediction:
         input_ids, labels = input_ids[:, : self.model_max_length], labels[:, : self.model_max_length]
         attention_mask = input_ids.ne(self.pad_token_id)
 
-        return dict(
+        output = dict(
             pixel_values=pixel_values,
             input_ids=input_ids,
             attention_mask=attention_mask,
             labels=labels,
             dataset_names=dataset_names,
         )
+        if profile_steps > 0:
+            profile_end = time.perf_counter()
+            output["profile"] = {
+                "collator_total": profile_end - profile_start,
+                "collator_pixel_stack": profile_pixel_done - profile_start,
+                "collator_lam": profile_lam_done - profile_pixel_done,
+                "collator_tokenize": profile_token_done - profile_lam_done,
+                "collator_pad": profile_end - profile_token_done,
+            }
+        return output
 
 
 @dataclass

@@ -555,12 +555,33 @@ class TrainingStrategy(ABC):
                 push_done = time.perf_counter()
 
                 if profile_steps > 0 and metrics.global_step <= profile_steps and overwatch.is_rank_zero():
+                    data_wait = data_ready - step_end
+                    profile = batch.get("profile", {})
+                    collator_total = profile.get("collator_total")
+                    if collator_total is None:
+                        profile_msg = ""
+                    else:
+                        profile_msg = (
+                            " dataset_fetch=%.3fs collator_total=%.3fs collator_pixel_stack=%.3fs "
+                            "collator_lam=%.3fs collator_tokenize=%.3fs collator_pad=%.3fs"
+                            % (
+                                max(data_wait - collator_total, 0.0),
+                                collator_total,
+                                profile["collator_pixel_stack"],
+                                profile["collator_lam"],
+                                profile["collator_tokenize"],
+                                profile["collator_pad"],
+                            )
+                        )
                     overwatch.info(
-                        "PROFILE step=%06d data_wait=%.3fs forward=%.3fs backward=%.3fs "
-                        "metrics=%.3fs clip=%.3fs optimizer=%.3fs push=%.3fs total=%.3fs"
+                        (
+                            "PROFILE step=%06d data_wait=%.3fs%s forward=%.3fs backward=%.3fs "
+                            "metrics=%.3fs clip=%.3fs optimizer=%.3fs push=%.3fs total=%.3fs"
+                        )
                         % (
                             metrics.global_step,
-                            data_ready - step_end,
+                            data_wait,
+                            profile_msg,
                             forward_done - data_ready,
                             backward_done - forward_done,
                             metrics_done - backward_done,
