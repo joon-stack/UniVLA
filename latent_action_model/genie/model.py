@@ -246,6 +246,9 @@ class DINO_LAM(LightningModule):
         return loss
 
     def on_train_epoch_end(self):
+        max_steps = getattr(self.trainer, "max_steps", None)
+        if max_steps is not None and max_steps > 0 and self.global_step >= max_steps:
+            return
         self.lam.vq.random_restart()
         self.lam.vq.reset_usage()
 

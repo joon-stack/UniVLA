@@ -1,4 +1,5 @@
 import math
+import os
 from typing import Tuple
 
 import torch
@@ -408,7 +409,7 @@ class VectorQuantizer(nn.Module):
         z = self.codebook(indices)
         
         # Update code usage
-        if not self.training or self.code_restart:
+        if (not self.training or self.code_restart) and os.environ.get("UNIVLA_LAM_DISABLE_USAGE_UPDATE", "0") != "1":
             self.update_usage(indices)
 
         # Straight through estimator
