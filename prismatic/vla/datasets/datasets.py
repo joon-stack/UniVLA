@@ -279,6 +279,30 @@ class RLDSBatchTransformLatentAction:
 
 
         return dict(pixel_values=pixel_values, input_ids=input_ids, labels=labels, dataset_name=dataset_name)
+
+
+@dataclass
+class RLDSBatchTransformLatentActionInputs:
+    image_transform: ImageTransform
+    image_transform_lam: ImageTransform
+
+    def __call__(self, rlds_batch: Dict[str, Any]) -> Dict[str, Any]:
+        """Prepare image/language inputs; the collator batches LAM pseudo-labeling."""
+        dataset_name = rlds_batch["dataset_name"]
+        lang = rlds_batch["task"]["language_instruction"].decode().lower()
+
+        img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])
+        img_k = Image.fromarray(rlds_batch["observation"]["image_primary"][-1])
+
+        return dict(
+            pixel_values=self.image_transform(img),
+            initial_lam_pixel_values=self.image_transform_lam(img),
+            target_lam_pixel_values=self.image_transform_lam(img_k),
+            lang=lang,
+            dataset_name=dataset_name,
+        )
+
+
 @dataclass
 class RLDSBatchTransformVideo:
     image_transform: ImageTransform

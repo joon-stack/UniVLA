@@ -5,8 +5,9 @@ General utilities and classes for facilitating data loading and collation.
 """
 import re
 import string
+import os
 from dataclasses import dataclass
-from typing import Callable, Dict, Sequence, Tuple
+from typing import Any, Callable, Dict, Sequence, Tuple
 
 import torch
 from torch.nn.utils.rnn import pad_sequence
@@ -141,6 +142,76 @@ class PaddedCollatorForActionPrediction:
         if dataset_names is not None:
             output["dataset_names"] = dataset_names
         return output
+
+
+@dataclass
+class PaddedCollatorForLatentActionPrediction:
+    model_max_length: int
+    pad_token_id: int
+    tokenizer: Any
+    latent_action_model: torch.nn.Module
+    prompt_builder_fn: Callable
+    padding_side: str = "right"
+    predict_stop_token: bool = True
+
+    def __call__(self, instances: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        pixel_values = [instance["pixel_values"] for instance in instances]
+        dataset_names = [instance["dataset_name"] for instance in instances]
+
+        if isinstance(pixel_values[0], torch.Tensor):
+            pixel_values = torch.stack(pixel_values)
+        elif isinstance(pixel_values[0], dict):
+            pixel_values = {
+                k: torch.stack([pixel_values[idx][k] for idx in range(len(instances))]) for k in pixel_values[0]
+            }
+        else:
+            raise ValueError(f"Unsupported `pixel_values` type = {type(pixel_values)}")
+
+        if os.environ.get("UNIVLA_DUMMY_LATENT_ACTIONS", "0") == "1":
+            latent_action_idx = torch.zeros((len(instances), 1), dtype=torch.long)
+        elif "initial_lam_pixel_values" in instances[0]:
+            initial = torch.stack([instance["initial_lam_pixel_values"] for instance in instances])
+            target = torch.stack([instance["target_lam_pixel_values"] for instance in instances])
+            device = next(self.latent_action_model.parameters()).device
+            video = torch.stack([initial, target], dim=1).to(device)
+            with torch.no_grad():
+                latent_action_idx = self.latent_action_model.vq_encode(video)["indices"].view(len(instances), -1)
+        else:
+            latent_action_idx = torch.zeros((len(instances), 1), dtype=torch.long)
+
+        input_ids, labels = [], []
+        for instance, action_indices in zip(instances, latent_action_idx.cpu()):
+            action_tokens = "".join(f"<ACT_{idx.item()}>" for idx in action_indices)
+            prompt_builder = self.prompt_builder_fn("openvla")
+            conversation = [
+                {"from": "human", "value": f"What action should the robot take to {instance['lang']}?"},
+                {"from": "gpt", "value": action_tokens},
+            ]
+            for turn in conversation:
+                prompt_builder.add_turn(turn["from"], turn["value"])
+
+            cur_input_ids = self.tokenizer(prompt_builder.get_prompt(), add_special_tokens=True).input_ids
+            cur_labels = list(cur_input_ids)
+            cur_input_ids, cur_labels = torch.tensor(cur_input_ids), torch.tensor(cur_labels)
+            cur_labels[: -(len(action_indices) + 1)] = IGNORE_INDEX
+            if not self.predict_stop_token:
+                cur_labels[-1] = IGNORE_INDEX
+            input_ids.append(cur_input_ids)
+            labels.append(cur_labels)
+
+        assert self.padding_side == "right", f"Invalid Tokenizer `{self.padding_side = }`"
+        input_ids = pad_sequence(input_ids, batch_first=True, padding_value=self.pad_token_id)
+        labels = pad_sequence(labels, batch_first=True, padding_value=IGNORE_INDEX)
+        input_ids, labels = input_ids[:, : self.model_max_length], labels[:, : self.model_max_length]
+        attention_mask = input_ids.ne(self.pad_token_id)
+
+        return dict(
+            pixel_values=pixel_values,
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            labels=labels,
+            dataset_names=dataset_names,
+        )
 
 
 @dataclass
