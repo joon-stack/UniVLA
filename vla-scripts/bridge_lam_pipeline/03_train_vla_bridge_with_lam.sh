@@ -8,12 +8,14 @@ BASE_VLM="${ROOT}/data/univla_checkpoints/prismatic-vlms/prism-dinosiglip-224px+
 LAM_CKPT="${LAM_CKPT:-${ROOT}/outputs/lam_bridge/logs/task_centric_lam_stage2_bridge/last.ckpt}"
 RUN_ROOT="${ROOT}/outputs/univla_bridge_lam_local"
 LOG_DIR="${ROOT}/outputs/univla_bridge_lam_local/run_logs"
-LOG="${LOG_DIR}/vla_bridge_with_local_lam_8xb200.log"
+LOG_NAME="${LOG_NAME:-vla_bridge_with_local_lam_8xb200.log}"
+LOG="${LOG_DIR}/${LOG_NAME}"
 
 GPUS_PER_NODE="${GPUS_PER_NODE:-8}"
 MASTER_PORT="${MASTER_PORT:-28611}"
 MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 MAX_STEPS="${MAX_STEPS:-20000}"
+SHUFFLE_BUFFER_SIZE="${SHUFFLE_BUFFER_SIZE:-20000}"
 WANDB_ENTITY="${WANDB_ENTITY:-joonstack}"
 WANDB_PROJECT="${WANDB_PROJECT:-univla_bridge_lam_local}"
 RUN_ID_NOTE="${RUN_ID_NOTE:-bridge_dataset_local_lam_stage2_b200}"
@@ -29,6 +31,7 @@ cd "${REPO}"
 ARGS=(
   --vla.type prism-dinosiglip-224px+mx-bridge
   --vla.max_steps "${MAX_STEPS}"
+  --vla.shuffle_buffer_size "${SHUFFLE_BUFFER_SIZE}"
   --pretrain_vlm "${BASE_VLM}"
   --lam_path "${LAM_CKPT}"
   --data_root_dir "${DATA_ROOT}"
