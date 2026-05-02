@@ -425,7 +425,7 @@ class TrainingStrategy(ABC):
         profile_steps = int(os.environ.get("UNIVLA_PROFILE_STEPS", "0"))
 
         def sync_cuda() -> None:
-            if torch.cuda.is_available():
+            if profile_steps > 0 and torch.cuda.is_available():
                 torch.cuda.synchronize()
 
         with tqdm(

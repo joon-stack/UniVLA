@@ -12,7 +12,7 @@ LOG="${LOG_DIR}/lam_stage2_bridge_8xb200.log"
 mkdir -p "${LOG_DIR}"
 
 test -f "${STAGE1_CKPT}"
-test -e "${ROOT}/data/rlds_bridge_orig/bridge_orig/1.0.0/dataset_info.json"
+test -e "${ROOT}/data/rlds_bridge_orig/bridge_dataset/1.0.0/dataset_info.json"
 
 export HF_HOME="${HF_HOME:-${ROOT}/data/hf_cache}"
 export WANDB_PROJECT="${WANDB_PROJECT:-univla_lam_bridge}"
