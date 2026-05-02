@@ -24,7 +24,13 @@ export UNIVLA_FRAME_THREADS="${UNIVLA_FRAME_THREADS:-8}"
 
 cd "${REPO}/latent_action_model"
 
-./train_lam_bridge_stage2.sh 2>&1 | tee "${LOG}"
+set +e
+./train_lam_bridge_stage2.sh "$@" 2>&1 | tee "${LOG}"
+status=${PIPESTATUS[0]}
+set -e
+if [[ ${status} -ne 0 ]]; then
+  exit "${status}"
+fi
 
 test -f "${STAGE2_LAST}"
 echo "[stage2] done: ${STAGE2_LAST}"
