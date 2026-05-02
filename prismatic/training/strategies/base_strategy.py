@@ -8,6 +8,8 @@ Training Strategies (DDP, FSDP-Grad, FSDP-Full) tend to have a lot of repeated c
 heavy lifting.
 """
 
+import os
+import time
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Callable, Optional
@@ -420,6 +422,12 @@ class TrainingStrategy(ABC):
 
         # === Train ===
         status = metrics.get_status()
+        profile_steps = int(os.environ.get("UNIVLA_PROFILE_STEPS", "0"))
+
+        def sync_cuda() -> None:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+
         with tqdm(
             total=(self.epochs * len(dataloader)) if self.max_steps is None else self.max_steps,
             desc=status,
@@ -434,7 +442,10 @@ class TrainingStrategy(ABC):
             # [Contract] DataLoader wraps RLDS Loader (`.as_numpy_iterator() =>> implicit `.repeat()`)
             #   => This means looping over the DataLoader is basically "infinite" (so no outer loop over epochs).
             #      Slightly breaks default PyTorch semantics, which is why we adaptively compute `epoch` below.
+            step_end = time.perf_counter()
             for batch in dataloader:
+                sync_cuda()
+                data_ready = time.perf_counter()
                 # Note that we'll unpack batch (and let AMP/FSDP do its thing) in the VLM.forward() call
                 #   => Basically, if we're using mixed precision (or not), autocast()/FSDP will move to device!
                 with torch.autocast(
@@ -448,10 +459,14 @@ class TrainingStrategy(ABC):
                         labels=batch["labels"],
                     )
                     loss = output.loss
+                sync_cuda()
+                forward_done = time.perf_counter()
 
                 # Commit Loss =>> Backward!
                 metrics.commit(loss=loss)
                 loss.backward()
+                sync_cuda()
+                backward_done = time.perf_counter()
 
                 # === Compute Action Token Accuracy & L1 Loss ===
 
@@ -488,6 +503,8 @@ class TrainingStrategy(ABC):
                 action_l1_loss = torch.tensor(0.)
                 # Commit Metrics
                 metrics.commit(action_accuracy=action_accuracy, l1_loss=action_l1_loss, update_step_time=True)
+                sync_cuda()
+                metrics_done = time.perf_counter()
 
                 # Compute metrics per dataset --> only on rank_zero since we don't log them on other workers anyways
                 if overwatch.is_rank_zero():
@@ -518,11 +535,15 @@ class TrainingStrategy(ABC):
 
                 # Clip Gradients --> this is custom, per-strategy because of DDP vs. FSDP locality assumptions
                 self.clip_grad_norm()
+                sync_cuda()
+                clip_done = time.perf_counter()
 
                 # Optimizer & LR Scheduler Step
                 self.optimizer.step()
                 self.lr_scheduler.step()
                 self.optimizer.zero_grad()
+                sync_cuda()
+                optimizer_done = time.perf_counter()
 
                 # Compute epoch value using number of completed gradient steps
                 epoch = (metrics.global_step + 1) // (len(vla_dataset) // self.global_batch_size)
@@ -530,6 +551,25 @@ class TrainingStrategy(ABC):
                 # Push Metrics
                 metrics.commit(global_step=metrics.global_step + 1, epoch=epoch, lr=self.lr_scheduler.get_last_lr()[0])
                 status = metrics.push()
+                sync_cuda()
+                push_done = time.perf_counter()
+
+                if profile_steps > 0 and metrics.global_step <= profile_steps and overwatch.is_rank_zero():
+                    overwatch.info(
+                        "PROFILE step=%06d data_wait=%.3fs forward=%.3fs backward=%.3fs "
+                        "metrics=%.3fs clip=%.3fs optimizer=%.3fs push=%.3fs total=%.3fs"
+                        % (
+                            metrics.global_step,
+                            data_ready - step_end,
+                            forward_done - data_ready,
+                            backward_done - forward_done,
+                            metrics_done - backward_done,
+                            clip_done - metrics_done,
+                            optimizer_done - clip_done,
+                            push_done - optimizer_done,
+                            push_done - step_end,
+                        )
+                    )
 
                 # Check for Save Interval or Max Steps & Save Checkpoint
                 if (terminate := (self.max_steps is not None and metrics.global_step >= self.max_steps)) or (
@@ -546,3 +586,4 @@ class TrainingStrategy(ABC):
                 # Update Progress Bar
                 progress.update()
                 progress.set_description(status)
+                step_end = time.perf_counter()
