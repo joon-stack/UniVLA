@@ -4,6 +4,7 @@ from typing import Tuple
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange, repeat
 from rotary_embedding_torch import RotaryEmbedding
 from torch import Tensor
@@ -65,21 +66,19 @@ class SelfAttention(nn.Module):
             is_causal: bool = False,
             attn_mask: Tensor = None,
     ) -> Tensor:
-        L, S = query.shape[-2], key.shape[-2]
-        attn_bias = torch.zeros(L, S, dtype=query.dtype).to(query)
-        if is_causal:
-            temp_mask = torch.ones(L, S, dtype=torch.bool).tril(diagonal=0).to(attn_bias)
-            attn_bias.masked_fill_(temp_mask.logical_not(), float("-inf"))
-
+        scaled_attn_mask = None
         if attn_mask is not None:
-            attn_bias = attn_bias.unsqueeze(0).repeat(query.shape[0], 1, 1)
-            attn_bias.masked_fill_((attn_mask>0).logical_not().unsqueeze(1), float("-inf"))
-            attn_bias = attn_bias.unsqueeze(1)
-            
-        attn_weight = query @ key.transpose(-2, -1) * self.scale
-        attn_weight += attn_bias
-        attn_weight = torch.softmax(attn_weight, dim=-1)
-        return attn_weight @ value
+            scaled_attn_mask = (attn_mask > 0).unsqueeze(1).unsqueeze(2)
+
+        return F.scaled_dot_product_attention(
+            query,
+            key,
+            value,
+            attn_mask=scaled_attn_mask,
+            dropout_p=0.0,
+            is_causal=is_causal,
+            scale=self.scale,
+        )
 
     def forward(self, x: Tensor, is_causal: bool = False, attn_mask: Tensor = None) -> Tensor:
         q = self.to_q(x)

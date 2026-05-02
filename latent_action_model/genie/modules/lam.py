@@ -1,3 +1,5 @@
+import os
+import time
 from typing import Dict, List
 
 import torch
@@ -238,15 +240,34 @@ class ControllableDINOLatentActionModel(nn.Module):
 
         # we only optimize the new tack-centric codebook in stage-2
         self.vq.requires_grad_(False)
+        self._module_profile_steps = int(os.environ.get("UNIVLA_LAM_MODULE_PROFILE_STEPS", "0"))
+        self._module_profile_count = 0
 
 
     def vq_encode(self, videos: Tensor, lang_embed: Tensor = None, attention_mask: Tensor = None) -> Dict:
         # Preprocess videos
+        profile = (
+            self._module_profile_steps
+            and self._module_profile_count < self._module_profile_steps
+            and os.environ.get("LOCAL_RANK", "0") == "0"
+        )
+        times = {}
+
+        def mark(name: str, start: float) -> float:
+            if profile and torch.cuda.is_available():
+                torch.cuda.synchronize()
+            now = time.perf_counter()
+            if profile:
+                times[name] = now - start
+            return now
+
+        start = time.perf_counter()
         B, T = videos.shape[:2]
         videos = rearrange(videos, "b T c h w -> (b T) c h w")
         videos = self.dino_transform(videos)
         dion_features = self.dino_encoder.forward_features(videos)['x_norm_patchtokens']
         dion_features = rearrange(dion_features, "(b T) l d -> b T l d", T=2)
+        start = mark("dino", start)
 
         action_pad = self.action_latent.expand(B, T, -1, -1)
         padded_patches = torch.cat([action_pad, dion_features], dim=2)
@@ -255,6 +276,7 @@ class ControllableDINOLatentActionModel(nn.Module):
 
         # Encode
         z = self.encoder(padded_patches) 
+        start = mark("encoder", start)
       
         # Get 'uncotrollable' latent action for all future frames
         z_uncontrol = self.to_codebook_uncontrol(z[:, 1:, self.num_codes : self.num_codes * 2])
@@ -263,6 +285,7 @@ class ControllableDINOLatentActionModel(nn.Module):
         z_uncontrol = z_uncontrol.reshape(B * (T - 1), self.num_codes, self.latent_dim)
         z_q_uncontrol, z_uncontrol, emb_uncontrol, indices_uncontrol = self.vq(z_uncontrol)
         z_q_uncontrol = z_q_uncontrol.reshape(B, T - 1, self.num_codes, self.latent_dim)
+        start = mark("vq_uncontrol", start)
 
         # Get 'cotrollable' latent action for all future frames
         z_action = self.to_codebook(z[:, 1:, :self.num_codes])  # (B, T-1, n, E)
@@ -271,6 +294,7 @@ class ControllableDINOLatentActionModel(nn.Module):
         z_action = z_action.reshape(B * (T - 1), self.num_codes, self.latent_dim)
         z_q, z, emb, indices = self.vq_action(z_action)
         z_q = z_q.reshape(B, T - 1, self.num_codes, self.latent_dim)
+        mark("vq_action", start)
 
         return {
             "patches": dion_features,
@@ -282,6 +306,7 @@ class ControllableDINOLatentActionModel(nn.Module):
             "emb_uncontrol": emb_uncontrol,
             "indices": indices,
             "indices_uncontrol": indices_uncontrol,
+            "_profile_times": times,
         }
 
     def forward(self, batch: Dict) -> Dict:
@@ -289,7 +314,15 @@ class ControllableDINOLatentActionModel(nn.Module):
         B, T = batch["videos"].shape[:2]
         H, W = batch["videos"].shape[3:5]
 
+        profile = (
+            self._module_profile_steps
+            and self._module_profile_count < self._module_profile_steps
+            and os.environ.get("LOCAL_RANK", "0") == "0"
+        )
         outputs = self.vq_encode(batch["videos"]) 
+        if profile and torch.cuda.is_available():
+            torch.cuda.synchronize()
+        decoder_start = time.perf_counter()
         video_patches = self.patch_up(outputs["patches"][:, :-1])
 
         # Decode
@@ -299,6 +332,24 @@ class ControllableDINOLatentActionModel(nn.Module):
                                           dim=2)
         video_recon = self.decoder(video_action_patches)
         video_recon = video_recon[:, :, -video_patches.shape[2]:] 
+        if profile:
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+            times = outputs.pop("_profile_times")
+            times["decoder"] = time.perf_counter() - decoder_start
+            print(
+                "LAM_MODULE_PROFILE "
+                f"step={self._module_profile_count + 1:06d} "
+                f"dino={times.get('dino', 0.0):.3f}s "
+                f"encoder={times.get('encoder', 0.0):.3f}s "
+                f"vq_uncontrol={times.get('vq_uncontrol', 0.0):.3f}s "
+                f"vq_action={times.get('vq_action', 0.0):.3f}s "
+                f"decoder={times.get('decoder', 0.0):.3f}s",
+                flush=True,
+            )
+        else:
+            outputs.pop("_profile_times", None)
+        self._module_profile_count += 1
 
         outputs.update(
             {
