@@ -1,3 +1,5 @@
+import os
+import time
 from os import listdir, makedirs, path
 from typing import Callable, Dict, Iterable, Tuple
 
@@ -84,6 +86,14 @@ class DINO_LAM(LightningModule):
 
         self.task_name = task_name
         self.distributed_state = PartialState()
+        self._profile_steps = int(os.environ.get("UNIVLA_LAM_PROFILE_STEPS", "0"))
+        self._profile_data_wait = 0.0
+        self._profile_batch_start = None
+        self._profile_shared_step = 0.0
+        self._profile_backward_start = None
+        self._profile_backward = 0.0
+        self._profile_prev_batch_end = None
+        self._profile_active_batch = False
         if self.distributed_state.is_main_process:
             wandb.init(name=task_name, reinit=True)
 
@@ -141,7 +151,13 @@ class DINO_LAM(LightningModule):
 
     def training_step(self, batch: Dict, batch_idx: int) -> Tensor:
         # Compute the training loss
+        if self._profile_steps and batch_idx < self._profile_steps and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            shared_start = time.perf_counter()
         outputs, loss, aux_losses = self.shared_step(batch)
+        if self._profile_steps and batch_idx < self._profile_steps and torch.cuda.is_available():
+            torch.cuda.synchronize()
+            self._profile_shared_step = time.perf_counter() - shared_start
 
 
         # Log the training loss
@@ -158,6 +174,53 @@ class DINO_LAM(LightningModule):
             wandb.log({**{"train_loss": loss}, **{f"train/{k}": v for k, v in aux_losses}})
 
         return loss
+
+    def on_train_start(self) -> None:
+        if self._profile_steps:
+            self._profile_prev_batch_end = time.perf_counter()
+
+    def on_train_batch_start(self, batch: Dict, batch_idx: int) -> None:
+        if not self._profile_steps or batch_idx >= self._profile_steps:
+            return
+        now = time.perf_counter()
+        self._profile_batch_start = now
+        self._profile_active_batch = True
+        if self._profile_prev_batch_end is not None:
+            self._profile_data_wait = now - self._profile_prev_batch_end
+
+    def on_before_backward(self, loss: Tensor) -> None:
+        if not self._profile_steps or not self._profile_active_batch:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self._profile_backward_start = time.perf_counter()
+
+    def on_after_backward(self) -> None:
+        if not self._profile_steps or not self._profile_active_batch or self._profile_backward_start is None:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        self._profile_backward = time.perf_counter() - self._profile_backward_start
+
+    def on_train_batch_end(self, outputs: Tensor, batch: Dict, batch_idx: int) -> None:
+        if not self._profile_steps:
+            return
+        if torch.cuda.is_available():
+            torch.cuda.synchronize()
+        now = time.perf_counter()
+        if batch_idx < self._profile_steps and self.distributed_state.is_main_process:
+            total = now - self._profile_batch_start if self._profile_batch_start is not None else 0.0
+            print(
+                "LAM_PROFILE "
+                f"step={batch_idx + 1:06d} "
+                f"data_wait={self._profile_data_wait:.3f}s "
+                f"shared_step={self._profile_shared_step:.3f}s "
+                f"backward={self._profile_backward:.3f}s "
+                f"total={total:.3f}s",
+                flush=True,
+            )
+        self._profile_prev_batch_end = now
+        self._profile_active_batch = False
 
 
     @torch.no_grad()
