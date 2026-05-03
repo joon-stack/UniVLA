@@ -33,8 +33,9 @@ OPENVLA_V01_SYSTEM_PROMPT = (
 def get_vla(pretrained_checkpoint: str):
     """Loads and returns a VLA model from checkpoint."""
     # Load VLA checkpoint.
+    attn_implementation = os.environ.get("UNIVLA_EVAL_ATTN_IMPLEMENTATION", "flash_attention_2")
     print("[*] Instantiating Pretrained VLA model")
-    print("[*] Loading in BF16 with Flash-Attention Enabled")
+    print(f"[*] Loading in BF16 with attention implementation: {attn_implementation}")
 
     # Register OpenVLA model to HF Auto Classes (not needed if the model is on HF Hub)
     AutoConfig.register("openvla", OpenVLAConfig)
@@ -44,7 +45,7 @@ def get_vla(pretrained_checkpoint: str):
 
     vla = AutoModelForVision2Seq.from_pretrained(
         pretrained_checkpoint,
-        attn_implementation="flash_attention_2",
+        attn_implementation=attn_implementation,
         torch_dtype=torch.bfloat16,
         load_in_8bit=False,
         load_in_4bit=False,
