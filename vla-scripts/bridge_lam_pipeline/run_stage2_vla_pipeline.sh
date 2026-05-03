@@ -63,8 +63,14 @@ run_lam_stage2() {
 
   rm -f "${REPO}/latent_action_model/config.yaml"
   cd "${REPO}"
+  LAM_STAGE2_ARGS=(--trainer.max_steps "${LAM_STAGE2_MAX_STEPS}")
+  if [[ -n "${LAM_STAGE2_RESUME_CKPT:-}" ]]; then
+    require_file "${LAM_STAGE2_RESUME_CKPT}"
+    LAM_STAGE2_ARGS+=(--ckpt_path "${LAM_STAGE2_RESUME_CKPT}")
+    echo "[pipeline] LAM stage2 resume: ${LAM_STAGE2_RESUME_CKPT}"
+  fi
   ./vla-scripts/bridge_lam_pipeline/01_train_lam_stage2_bridge.sh \
-    --trainer.max_steps "${LAM_STAGE2_MAX_STEPS}" \
+    "${LAM_STAGE2_ARGS[@]}" \
     2>&1 | tee "${LOG_ROOT}/lam_stage2.log"
 
   require_file "${STAGE2_CKPT}"
