@@ -38,6 +38,10 @@ class Args:
 
     shader: str = "default"
 
+    sim_backend: str = "auto"
+
+    render_backend: str = "gpu"
+
     num_envs: int = 1
     """Number of environments to run. With more than 1 environment the environment will use the GPU backend 
     which runs faster enabling faster large-scale evaluations. Note that the overall behavior of the simulation
@@ -87,9 +91,11 @@ def main():
         args.env_id,
         obs_mode="rgb+segmentation",
         num_envs=args.num_envs,
-        sensor_configs=sensor_configs
+        sensor_configs=sensor_configs,
+        sim_backend=args.sim_backend,
+        render_backend=args.render_backend,
     )
-    sim_backend = 'gpu' if env.device.type == 'cuda' else 'cpu'
+    sim_backend = 'gpu' if env.unwrapped.device.type == 'cuda' else 'cpu'
 
     # Setup up the policy inference model
     model = None

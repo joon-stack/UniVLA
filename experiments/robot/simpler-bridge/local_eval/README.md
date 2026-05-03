@@ -113,10 +113,22 @@ does not require a working `flash-attn` build. Set
 `UNIVLA_EVAL_ATTN_IMPLEMENTATION=flash_attention_2` if that package is installed
 and known-good in the eval venv.
 
-The import smoke test currently emits TensorFlow GPU and SAPIEN Vulkan ICD
-warnings on this machine. Policy import and ManiSkill3 task registration still
-pass; if an actual episode fails at render/reset time, check the Vulkan ICD
-installation first.
+This container does not expose NVIDIA graphics libraries, so the default
+SAPIEN CUDA renderer can hang while probing the broken NVIDIA Vulkan ICD. The
+local launcher therefore defaults to CPU simulation/rendering with Mesa
+lavapipe:
+
+```bash
+export SIM_BACKEND=physx_cpu
+export RENDER_BACKEND=sapien_cpu
+export VK_ICD_FILENAMES=/usr/share/vulkan/icd.d/lvp_icd.json
+export __EGL_VENDOR_LIBRARY_FILENAMES=/dev/null
+```
+
+This is slower than GPU rendering, but it has been smoke-tested in this
+container with a public UniVLA checkpoint for one `PutSpoonOnTableClothInScene`
+episode. The NVIDIA graphics path still requires a container launched with the
+proper graphics driver capabilities.
 
 Full four-task run:
 

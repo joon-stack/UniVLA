@@ -11,6 +11,8 @@ NUM_ENVS="${NUM_ENVS:-1}"
 SEED="${SEED:-0}"
 SAVE_VIDEO="${SAVE_VIDEO:-1}"
 PRED_ACTION_HORIZON="${PRED_ACTION_HORIZON:-10}"
+SIM_BACKEND="${SIM_BACKEND:-physx_cpu}"
+RENDER_BACKEND="${RENDER_BACKEND:-sapien_cpu}"
 RECORD_DIR="${RECORD_DIR:-${ROOT}/eval_logs/simplerenv_univla_like}"
 
 if [[ -z "${CKPT_PATH:-}" || -z "${ACTION_DECODER_PATH:-}" ]]; then
@@ -30,6 +32,9 @@ export PYTHONPATH="${REPO}:${REPO}/latent_action_model:${SIMPLERENV_DIR}:${PYTHO
 export XLA_PYTHON_CLIENT_PREALLOCATE=false
 export TOKENIZERS_PARALLELISM=false
 export UNIVLA_EVAL_ATTN_IMPLEMENTATION="${UNIVLA_EVAL_ATTN_IMPLEMENTATION:-sdpa}"
+export VK_ICD_FILENAMES="${VK_ICD_FILENAMES:-/usr/share/vulkan/icd.d/lvp_icd.json}"
+export __EGL_VENDOR_LIBRARY_FILENAMES="${__EGL_VENDOR_LIBRARY_FILENAMES:-/dev/null}"
+export DISPLAY="${DISPLAY:-}"
 
 TASKS=(
   "PutSpoonOnTableClothInScene-v1"
@@ -52,6 +57,8 @@ for task in "${TASKS[@]}"; do
     -s "${SEED}" \
     --num-episodes "${NUM_EPISODES}" \
     --num-envs "${NUM_ENVS}" \
+    --sim-backend "${SIM_BACKEND}" \
+    --render-backend "${RENDER_BACKEND}" \
     --record-dir "${RECORD_DIR}" \
     "${SAVE_VIDEO_ARG}" \
     --pred-action-horizon "${PRED_ACTION_HORIZON}" \
