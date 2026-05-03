@@ -60,6 +60,7 @@ run_lam_stage2() {
   export UNIVLA_TRAJ_READ_THREADS="${UNIVLA_TRAJ_READ_THREADS:-4}"
   export UNIVLA_FRAME_THREADS="${UNIVLA_FRAME_THREADS:-8}"
   export UNIVLA_TF_RAM_BUDGET_MB="${UNIVLA_TF_RAM_BUDGET_MB:-512}"
+  export UNIVLA_RLDS_LEN_OVERRIDE="${LAM_STAGE2_LEN_OVERRIDE:-$((LAM_STAGE2_MAX_STEPS + 1000))}"
 
   rm -f "${REPO}/latent_action_model/config.yaml"
   cd "${REPO}"

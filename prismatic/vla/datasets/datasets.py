@@ -415,6 +415,9 @@ class RLDSDataset(IterableDataset):
             yield self.batch_transform(rlds_batch)
 
     def __len__(self) -> int:
+        length_override = os.environ.get("UNIVLA_RLDS_LEN_OVERRIDE")
+        if length_override:
+            return int(length_override)
         return self.dataset_length
 
     # === Explicitly Unused ===
