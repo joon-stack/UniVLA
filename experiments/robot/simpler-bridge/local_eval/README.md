@@ -139,6 +139,10 @@ For UniVLA/MVP-LAM-style policies, `CKPT_PATH` must contain HF model files and
 `dataset_statistics.json`; `ACTION_DECODER_PATH` must be the matching action
 decoder weights.
 
+Set `PRED_ACTION_HORIZON` to match the action decoder. The public UniVLA
+SimpleREnv checkpoint uses horizon 10; the public MVP-LAM SimpleREnv checkpoint
+uses `action_decoder-10000.pt` with horizon 5.
+
 ## LAPA
 
 LAPA currently has its own legacy launcher and official checkpoint:

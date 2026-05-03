@@ -10,6 +10,7 @@ NUM_EPISODES="${NUM_EPISODES:-24}"
 NUM_ENVS="${NUM_ENVS:-1}"
 SEED="${SEED:-0}"
 SAVE_VIDEO="${SAVE_VIDEO:-1}"
+PRED_ACTION_HORIZON="${PRED_ACTION_HORIZON:-10}"
 RECORD_DIR="${RECORD_DIR:-${ROOT}/eval_logs/simplerenv_univla_like}"
 
 if [[ -z "${CKPT_PATH:-}" || -z "${ACTION_DECODER_PATH:-}" ]]; then
@@ -53,6 +54,7 @@ for task in "${TASKS[@]}"; do
     --num-envs "${NUM_ENVS}" \
     --record-dir "${RECORD_DIR}" \
     "${SAVE_VIDEO_ARG}" \
+    --pred-action-horizon "${PRED_ACTION_HORIZON}" \
     --action_decoder_path "${ACTION_DECODER_PATH}" \
     --ckpt_path "${CKPT_PATH}"
 done

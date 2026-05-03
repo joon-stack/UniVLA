@@ -57,6 +57,8 @@ class Args:
 
     action_decoder_path: str = ""
 
+    pred_action_horizon: int = 10
+
     seed: Annotated[int, tyro.conf.arg(aliases=["-s"])] = 0
     """Seed the model and environment. Default seed is 0"""
 
@@ -102,7 +104,7 @@ def main():
                 decoder_path=args.action_decoder_path,
                 policy_setup=policy_setup,
                 action_scale=1,
-                pred_action_horizon=10,
+                pred_action_horizon=args.pred_action_horizon,
             )
 
     except:
