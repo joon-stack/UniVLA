@@ -183,6 +183,8 @@ class LightningOpenX(LightningDataset):
             batch_size:int = 16,
             resolution: int = 256,
             num_frames: int = 16,
+            lam_window_size: int = 10,
+            lam_random_horizon: bool = False,
             episodic: bool = False,
             shuffle_buffer_size: int = 100_000,
             image_aug:bool = False,
@@ -196,6 +198,8 @@ class LightningOpenX(LightningDataset):
         self.batch_size = batch_size
         self.resolution = (resolution, resolution)
         self.num_frames = num_frames
+        self.lam_window_size = lam_window_size
+        self.lam_random_horizon = lam_random_horizon
 
         self.episodic = episodic
         self.shuffle_buffer_size = shuffle_buffer_size
@@ -220,9 +224,11 @@ class LightningOpenX(LightningDataset):
                 self.batch_transform,
                 resize_resolution=self.resolution,
                 shuffle_buffer_size=self.shuffle_buffer_size,
+                window_size=self.lam_window_size,
                 train=True,
                 image_aug=self.image_aug,
                 training_phase='lam',
+                lam_random_horizon=self.lam_random_horizon,
             )
             self.val_dataset = cls(
                 self.data_root_dir,
@@ -230,9 +236,11 @@ class LightningOpenX(LightningDataset):
                 self.batch_transform,
                 resize_resolution=self.resolution,
                 shuffle_buffer_size=self.shuffle_buffer_size,
+                window_size=self.lam_window_size,
                 train=False,
                 image_aug=False,
                 training_phase='lam',
+                lam_random_horizon=self.lam_random_horizon,
             )
         elif stage == "test":
             self.test_dataset = cls(
@@ -241,10 +249,11 @@ class LightningOpenX(LightningDataset):
                 self.batch_transform,
                 resize_resolution=self.resolution,
                 shuffle_buffer_size=self.shuffle_buffer_size,
+                window_size=self.lam_window_size,
                 train=True,
                 image_aug=False,
                 training_phase='lam',
+                lam_random_horizon=self.lam_random_horizon,
             )
         else:
             raise ValueError(f"Invalid stage: {stage}")
-

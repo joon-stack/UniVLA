@@ -444,7 +444,24 @@ class CollatorForLatentAction:
         
         target_pixel_values = [instance["target_pixel_values"] for instance in instances]
         target_pixel_values = torch.stack(target_pixel_values)
-        pixel_values = torch.stack([initial_pixel_values, target_pixel_values], dim=1)
+        if "middle_pixel_values" in instances[0]:
+            middle_pixel_values = [instance["middle_pixel_values"] for instance in instances]
+            middle_pixel_values = torch.stack(middle_pixel_values)
+            pixel_values = torch.stack([initial_pixel_values, target_pixel_values], dim=1)
+            radprog_mid_offsets = torch.tensor(
+                [float(instance["radprog_h1_offset"]) for instance in instances],
+                dtype=torch.float32,
+            )
+            radprog_future_offsets = torch.tensor(
+                [float(instance["radprog_h2_offset"]) for instance in instances],
+                dtype=torch.float32,
+            )
+            radprog_valid = torch.tensor(
+                [float(instance["radprog_valid"]) for instance in instances],
+                dtype=torch.float32,
+            )
+        else:
+            pixel_values = torch.stack([initial_pixel_values, target_pixel_values], dim=1)
 
 
         action = [torch.from_numpy(instance["action"]) for instance in instances]
@@ -459,6 +476,11 @@ class CollatorForLatentAction:
             task_instruction=task_instruction,
             action=action,
         )
+        if "middle_pixel_values" in instances[0]:
+            output["radprog_mid_pixel_values"] = middle_pixel_values
+            output["radprog_mid_offsets"] = radprog_mid_offsets
+            output["radprog_future_offsets"] = radprog_future_offsets
+            output["radprog_valid"] = radprog_valid
         if dataset_names is not None:
             output["dataset_names"] = dataset_names
 

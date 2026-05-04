@@ -63,6 +63,80 @@ def chunk_act_obs(traj, window_size, future_action_window_size):
     return traj
 
 
+def chunk_act_obs_random_horizon(traj, window_size, future_action_window_size):
+    traj_len = tf.shape(traj["action"])[0]
+    action_dim = traj["action"].shape[-1]
+    max_offset = tf.maximum(tf.cast(window_size - 1, tf.int32), 2)
+
+    first_indices = tf.range(traj_len, dtype=tf.int32)
+    remaining = tf.maximum(traj_len - 1 - first_indices, 0)
+    max_valid_offset = tf.minimum(max_offset, remaining)
+    valid = max_valid_offset >= 2
+
+    h2_span = tf.maximum(max_valid_offset - 1, 1)
+    sampled_h2 = tf.cast(
+        tf.floor(tf.random.uniform(shape=[traj_len]) * tf.cast(h2_span, tf.float32)),
+        tf.int32,
+    ) + 2
+    h2_offsets = tf.where(valid, sampled_h2, remaining)
+
+    h1_span = tf.maximum(h2_offsets - 1, 1)
+    sampled_h1 = tf.cast(
+        tf.floor(tf.random.uniform(shape=[traj_len]) * tf.cast(h1_span, tf.float32)),
+        tf.int32,
+    ) + 1
+    h1_offsets = tf.where(valid, sampled_h1, tf.zeros_like(sampled_h1))
+
+    chunk_indices = tf.stack(
+        [
+            first_indices,
+            first_indices + h1_offsets,
+            first_indices + h2_offsets,
+        ],
+        axis=1,
+    )
+    action_chunk_indices = tf.stack(
+        [
+            first_indices,
+            first_indices + h2_offsets + future_action_window_size,
+        ],
+        axis=1,
+    )
+
+    floored_chunk_indices = tf.maximum(tf.minimum(chunk_indices, traj_len - 1), 0)
+
+    if "timestep" in traj["task"]:
+        goal_timestep = traj["task"]["timestep"]
+    else:
+        goal_timestep = tf.fill([traj_len], traj_len - 1)
+
+    floored_action_chunk_indices = tf.minimum(tf.maximum(action_chunk_indices, 0), goal_timestep[:, None])
+
+    traj["observation"] = tf.nest.map_structure(lambda x: tf.gather(x, floored_chunk_indices), traj["observation"])
+    traj["action"] = tf.gather(traj["action"], floored_action_chunk_indices)
+    traj["observation"]["pad_mask"] = chunk_indices >= 0
+    traj["observation"]["lam_h1_offset"] = h1_offsets
+    traj["observation"]["lam_h2_offset"] = h2_offsets
+    traj["observation"]["lam_radprog_valid"] = valid
+
+    if "absolute_action_mask" not in traj and future_action_window_size > 0:
+        logging.warning(
+            "future_action_window_size > 0 but no absolute_action_mask was provided. "
+            "Assuming all actions are relative for the purpose of making neutral actions."
+        )
+    absolute_action_mask = traj.get("absolute_action_mask", tf.zeros([traj_len, action_dim], dtype=tf.bool))
+    neutral_actions = tf.where(
+        absolute_action_mask[:, None, :],
+        traj["action"],
+        tf.zeros_like(traj["action"]),
+    )
+
+    action_past_goal = action_chunk_indices > goal_timestep[:, None]
+    traj["action"] = tf.where(action_past_goal[:, :, None], neutral_actions, traj["action"])
+
+    return traj
+
+
 def chunk_act_obs_libero(traj: Dict, window_size: int, future_action_window_size: int = 0) -> Dict:
     """
     Chunks actions and observations into the given window_size.

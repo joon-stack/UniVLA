@@ -315,15 +315,38 @@ class RLDSBatchTransformVideo:
 
         img = Image.fromarray(rlds_batch["observation"]["image_primary"][0])#.copy()
         initial_pixel_values = self.image_transform(img)
-        
+
+        output = dict(
+            initial_pixel_values=initial_pixel_values,
+            task_instruction=lang,
+            action=action,
+            dataset_name=dataset_name,
+        )
+
+        if len(rlds_batch["observation"]["image_primary"]) > 2:
+            img_h1 = Image.fromarray(rlds_batch["observation"]["image_primary"][1])
+            output["middle_pixel_values"] = self.image_transform(img_h1)
+            output["radprog_h1_offset"] = np.array(
+                rlds_batch["observation"].get("lam_h1_offset", 0),
+                dtype=np.float32,
+            )
+            output["radprog_h2_offset"] = np.array(
+                rlds_batch["observation"].get("lam_h2_offset", 0),
+                dtype=np.float32,
+            )
+            output["radprog_valid"] = np.array(
+                rlds_batch["observation"].get("lam_radprog_valid", False),
+                dtype=np.float32,
+            )
+
         # the frame interval is already tackled in RLDS dataloader
         target_frame_index = -1
         img_k = Image.fromarray(rlds_batch["observation"]["image_primary"][target_frame_index])#.copy()
         # print(sum(np.array(img_k) - np.array(img)))
         target_pixel_values= self.image_transform(img_k)
+        output["target_pixel_values"] = target_pixel_values
 
-        return dict(initial_pixel_values=initial_pixel_values, target_pixel_values=target_pixel_values, 
-                    task_instruction=lang, action=action, dataset_name=dataset_name)
+        return output
 
 
 
@@ -340,6 +363,7 @@ class RLDSDataset(IterableDataset):
         train: bool = True,
         image_aug: bool = False,
         training_phase: str = 'lam',
+        lam_random_horizon: bool = False,
     ) -> None:
         """Lightweight wrapper around RLDS TFDS Pipeline for use with PyTorch/OpenVLA Data Loaders."""
         self.data_root_dir, self.data_mix, self.batch_transform = data_root_dir, data_mix, batch_transform
@@ -367,6 +391,7 @@ class RLDSDataset(IterableDataset):
                 future_action_window_size=0,                        # For action chunking
                 skip_unlabeled=True,                                # Skip trajectories without language labels
                 goal_relabeling_strategy="uniform",                 # Goals are currently unused
+                lam_random_horizon=lam_random_horizon,
             ),
             frame_transform_kwargs=dict(
                 resize_size=resize_resolution,

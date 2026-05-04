@@ -288,6 +288,7 @@ def apply_trajectory_transforms(
     task_augment_kwargs: dict = {},
     num_parallel_calls: int = tf.data.AUTOTUNE,
     training_phase: str = None,
+    lam_random_horizon: bool = False,
 ) -> dl.DLataset:
     """
     Applies common transforms that happen at a trajectory level. Such transforms are usually some sort of "relabeling"
@@ -370,6 +371,8 @@ def apply_trajectory_transforms(
         
     if training_phase == 'post-training':
         transform = traj_transforms.chunk_act_obs_libero    # load all obs. within a window
+    elif lam_random_horizon:
+        transform = traj_transforms.chunk_act_obs_random_horizon
     else:       
         transform = traj_transforms.chunk_act_obs           # only load the first and last obs. within a window
 
