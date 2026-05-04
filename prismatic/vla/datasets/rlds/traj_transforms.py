@@ -10,23 +10,30 @@ from typing import Dict
 
 import tensorflow as tf
 
-def chunk_act_obs(traj, window_size, future_action_window_size):
+def chunk_act_obs(traj, window_size, future_action_window_size, lam_random_horizon=False, lam_window_size=10):
     traj_len = tf.shape(traj["action"])[0]
     action_dim = traj["action"].shape[-1]
 
-    # Create indices for the first and last elements within the window size
-    first_indices = tf.range(traj_len)[:, None]  # First index is the current timestep
-    last_indices = tf.maximum(first_indices + (window_size - 1), 0)  # Last index is the end of the window
-    
-    # Combine first and last indices into a single tensor
-    chunk_indices = tf.concat([first_indices, last_indices], axis=1)  # Shape: [traj_len, 2]
+    first_indices = tf.range(traj_len)[:, None]
+    if lam_random_horizon:
+        future_offsets = tf.random.uniform([traj_len, 1], minval=2, maxval=lam_window_size, dtype=tf.int32)
+        mid_offsets = tf.cast(
+            tf.floor(tf.random.uniform([traj_len, 1]) * tf.cast(future_offsets - 1, tf.float32)),
+            tf.int32,
+        ) + 1
+        chunk_indices = tf.concat(
+            [first_indices, first_indices + mid_offsets, first_indices + future_offsets],
+            axis=1,
+        )
+    else:
+        last_indices = tf.maximum(first_indices + (window_size - 1), 0)
+        chunk_indices = tf.concat([first_indices, last_indices], axis=1)
 
     # Create action_chunk_indices for the first and last elements
     action_first_indices = first_indices
     action_last_indices = tf.minimum(first_indices + (window_size + future_action_window_size - 1), traj_len - 1)
     action_chunk_indices = tf.concat([action_first_indices, action_last_indices], axis=1)  # Shape: [traj_len, 2]
 
-    # Ensure indices are bounded
     floored_chunk_indices = tf.maximum(tf.minimum(chunk_indices, traj_len - 1), 0)
 
     if "timestep" in traj["task"]:
@@ -40,8 +47,11 @@ def chunk_act_obs(traj, window_size, future_action_window_size):
     traj["observation"] = tf.nest.map_structure(lambda x: tf.gather(x, floored_chunk_indices), traj["observation"])
     traj["action"] = tf.gather(traj["action"], floored_action_chunk_indices)
 
-    # indicates whether an entire observation is padding
     traj["observation"]["pad_mask"] = chunk_indices >= 0
+    if lam_random_horizon:
+        traj["task"]["radprog_mid_offsets"] = tf.squeeze(mid_offsets, axis=1)
+        traj["task"]["radprog_future_offsets"] = tf.squeeze(future_offsets, axis=1)
+        traj["task"]["radprog_valid"] = tf.squeeze(first_indices + future_offsets < traj_len, axis=1)
 
     # If no absolute_action_mask was provided, assume all actions are relative
     if "absolute_action_mask" not in traj and future_action_window_size > 0:

@@ -289,6 +289,7 @@ def apply_trajectory_transforms(
     num_parallel_calls: int = tf.data.AUTOTUNE,
     training_phase: str = None,
     lam_random_horizon: bool = False,
+    lam_window_size: int = 10,
 ) -> dl.DLataset:
     """
     Applies common transforms that happen at a trajectory level. Such transforms are usually some sort of "relabeling"
@@ -359,20 +360,23 @@ def apply_trajectory_transforms(
 
 
     # adjust frame interval based on their frame rate
-    if 'ego4d' in name:
+    if lam_random_horizon and lam_window_size < 3:
+        raise ValueError("lam_window_size must be at least 3 when lam_random_horizon=True.")
+
+    if lam_random_horizon:
+        window_size = lam_window_size
+    elif 'ego4d' in name:
         window_size = 2
 
-    if name in datasets_with_lower_frequency:
+    if not lam_random_horizon and name in datasets_with_lower_frequency:
         window_size = random.randint(3,5) if training_phase == 'lam' else 3
     
-    if name in datasets_with_higher_frequency:
+    if not lam_random_horizon and name in datasets_with_higher_frequency:
         window_size = random.randint(15,20) if training_phase == 'lam' else 15
 
         
     if training_phase == 'post-training':
         transform = traj_transforms.chunk_act_obs_libero    # load all obs. within a window
-    elif lam_random_horizon:
-        transform = traj_transforms.chunk_act_obs_random_horizon
     else:       
         transform = traj_transforms.chunk_act_obs           # only load the first and last obs. within a window
 
@@ -381,6 +385,8 @@ def apply_trajectory_transforms(
             transform,
             window_size=window_size,
             future_action_window_size=future_action_window_size,
+            lam_random_horizon=lam_random_horizon,
+            lam_window_size=lam_window_size,
         ),
         num_parallel_calls,
     )

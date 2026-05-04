@@ -224,11 +224,11 @@ class LightningOpenX(LightningDataset):
                 self.batch_transform,
                 resize_resolution=self.resolution,
                 shuffle_buffer_size=self.shuffle_buffer_size,
-                window_size=self.lam_window_size,
                 train=True,
                 image_aug=self.image_aug,
                 training_phase='lam',
                 lam_random_horizon=self.lam_random_horizon,
+                lam_window_size=self.lam_window_size,
             )
             self.val_dataset = cls(
                 self.data_root_dir,
@@ -236,11 +236,11 @@ class LightningOpenX(LightningDataset):
                 self.batch_transform,
                 resize_resolution=self.resolution,
                 shuffle_buffer_size=self.shuffle_buffer_size,
-                window_size=self.lam_window_size,
                 train=False,
                 image_aug=False,
                 training_phase='lam',
                 lam_random_horizon=self.lam_random_horizon,
+                lam_window_size=self.lam_window_size,
             )
         elif stage == "test":
             self.test_dataset = cls(
@@ -249,11 +249,11 @@ class LightningOpenX(LightningDataset):
                 self.batch_transform,
                 resize_resolution=self.resolution,
                 shuffle_buffer_size=self.shuffle_buffer_size,
-                window_size=self.lam_window_size,
                 train=True,
                 image_aug=False,
                 training_phase='lam',
                 lam_random_horizon=self.lam_random_horizon,
+                lam_window_size=self.lam_window_size,
             )
         else:
             raise ValueError(f"Invalid stage: {stage}")

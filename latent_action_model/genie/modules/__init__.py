@@ -1,2 +1,2 @@
-from latent_action_model.genie.modules.lam import UncontrolledDINOLatentActionModel, ControllableDINOLatentActionModel
-from latent_action_model.genie.modules.lam_visual_vq import VisualVQDINOLatentActionModel
+from .lam import UncontrolledDINOLatentActionModel, ControllableDINOLatentActionModel
+from .lam_visual_vq import VisualVQDINOLatentActionModel

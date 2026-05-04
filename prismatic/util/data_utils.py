@@ -10,6 +10,7 @@ import time
 from dataclasses import dataclass
 from typing import Any, Callable, Dict, Sequence, Tuple
 
+import numpy as np
 import torch
 from torch.nn.utils.rnn import pad_sequence
 
@@ -433,6 +434,8 @@ class CollatorForLatentAction:
     pixel_values_dtype: torch.dtype = torch.float32
 
     def __call__(self, instances: Sequence[Dict[str, torch.Tensor]]) -> Dict[str, torch.Tensor]:
+        def scalar_value(value: Any) -> Any:
+            return np.asarray(value).reshape(-1)[0].item()
         
         if "dataset_name" in instances[0]:
             dataset_names = [instance["dataset_name"] for instance in instances]
@@ -444,24 +447,7 @@ class CollatorForLatentAction:
         
         target_pixel_values = [instance["target_pixel_values"] for instance in instances]
         target_pixel_values = torch.stack(target_pixel_values)
-        if "middle_pixel_values" in instances[0]:
-            middle_pixel_values = [instance["middle_pixel_values"] for instance in instances]
-            middle_pixel_values = torch.stack(middle_pixel_values)
-            pixel_values = torch.stack([initial_pixel_values, target_pixel_values], dim=1)
-            radprog_mid_offsets = torch.tensor(
-                [float(instance["radprog_h1_offset"]) for instance in instances],
-                dtype=torch.float32,
-            )
-            radprog_future_offsets = torch.tensor(
-                [float(instance["radprog_h2_offset"]) for instance in instances],
-                dtype=torch.float32,
-            )
-            radprog_valid = torch.tensor(
-                [float(instance["radprog_valid"]) for instance in instances],
-                dtype=torch.float32,
-            )
-        else:
-            pixel_values = torch.stack([initial_pixel_values, target_pixel_values], dim=1)
+        pixel_values = torch.stack([initial_pixel_values, target_pixel_values], dim=1)
 
 
         action = [torch.from_numpy(instance["action"]) for instance in instances]
@@ -476,11 +462,22 @@ class CollatorForLatentAction:
             task_instruction=task_instruction,
             action=action,
         )
-        if "middle_pixel_values" in instances[0]:
-            output["radprog_mid_pixel_values"] = middle_pixel_values
-            output["radprog_mid_offsets"] = radprog_mid_offsets
-            output["radprog_future_offsets"] = radprog_future_offsets
-            output["radprog_valid"] = radprog_valid
+        if "radprog_mid_pixel_values" in instances[0]:
+            output.update(
+                radprog_mid_pixel_values=torch.stack([instance["radprog_mid_pixel_values"] for instance in instances]),
+                radprog_mid_offsets=torch.as_tensor(
+                    [scalar_value(instance["radprog_mid_offsets"]) for instance in instances],
+                    dtype=torch.long,
+                ),
+                radprog_future_offsets=torch.as_tensor(
+                    [scalar_value(instance["radprog_future_offsets"]) for instance in instances],
+                    dtype=torch.long,
+                ),
+                radprog_valid=torch.as_tensor(
+                    [scalar_value(instance["radprog_valid"]) for instance in instances],
+                    dtype=torch.float32,
+                ),
+            )
         if dataset_names is not None:
             output["dataset_names"] = dataset_names
 
