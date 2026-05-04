@@ -177,7 +177,7 @@ class VisualVQ_DINO_LAM(LightningModule):
         if z_future.shape[0] != batch_size:
             z_future = z_future.reshape(batch_size, -1, *z_future.shape[1:])[:, 0]
 
-        z_flat = z_future.detach().reshape(batch_size, -1)
+        z_flat = z_future.detach().reshape(batch_size, -1).float()
         target = batch["action"].to(device=z_flat.device, dtype=z_flat.dtype).reshape(batch_size, -1)
         probe_state = self._action_probe_state
         if probe_state["probe"] is None:
