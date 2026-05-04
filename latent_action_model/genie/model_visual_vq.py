@@ -69,10 +69,13 @@ class VisualVQ_DINO_LAM(LightningModule):
         self.action_probe_enabled = action_probe_enabled
         self.action_probe_shuffle = action_probe_shuffle
         self.action_probe_lr = action_probe_lr
-        self.action_probe = None
-        self.action_probe_optimizer = None
-        self.action_probe_shuffled = None
-        self.action_probe_shuffled_optimizer = None
+        # Probe weights are diagnostics only; keep them out of Lightning state_dict/checkpoints.
+        self._action_probe_state = {
+            "probe": None,
+            "optimizer": None,
+            "shuffled": None,
+            "shuffled_optimizer": None,
+        }
         self.log_interval = log_interval
         self.log_path = log_path
         self.optimizer = optimizer
@@ -125,12 +128,14 @@ class VisualVQ_DINO_LAM(LightningModule):
         )
 
     def _build_action_probe(self, z_dim: int, action_dim: int, device: torch.device) -> None:
-        self.action_probe = torch.nn.Linear(z_dim, action_dim).to(device)
-        self.action_probe_optimizer = torch.optim.Adam(self.action_probe.parameters(), lr=self.action_probe_lr)
+        probe = torch.nn.Linear(z_dim, action_dim).to(device)
+        self._action_probe_state["probe"] = probe
+        self._action_probe_state["optimizer"] = torch.optim.Adam(probe.parameters(), lr=self.action_probe_lr)
         if self.action_probe_shuffle:
-            self.action_probe_shuffled = torch.nn.Linear(z_dim, action_dim).to(device)
-            self.action_probe_shuffled_optimizer = torch.optim.Adam(
-                self.action_probe_shuffled.parameters(),
+            shuffled = torch.nn.Linear(z_dim, action_dim).to(device)
+            self._action_probe_state["shuffled"] = shuffled
+            self._action_probe_state["shuffled_optimizer"] = torch.optim.Adam(
+                shuffled.parameters(),
                 lr=self.action_probe_lr,
             )
 
@@ -165,32 +170,52 @@ class VisualVQ_DINO_LAM(LightningModule):
             return ()
 
         batch_size = batch["action"].shape[0]
-        z_future = outputs.get("radprog_z_future", outputs["emb"])
+        if "radprog_z_future" in outputs:
+            z_future = outputs["radprog_z_future"]
+        else:
+            z_future = outputs["emb"]
         if z_future.shape[0] != batch_size:
             z_future = z_future.reshape(batch_size, -1, *z_future.shape[1:])[:, 0]
 
         z_flat = z_future.detach().reshape(batch_size, -1)
         target = batch["action"].to(device=z_flat.device, dtype=z_flat.dtype).reshape(batch_size, -1)
-        if self.action_probe is None:
+        probe_state = self._action_probe_state
+        if probe_state["probe"] is None:
             self._build_action_probe(z_flat.shape[-1], target.shape[-1], z_flat.device)
+            probe_state = self._action_probe_state
 
         logs = self._run_action_probe(
-            self.action_probe,
-            self.action_probe_optimizer,
+            probe_state["probe"],
+            probe_state["optimizer"],
             z_flat,
             target,
             "z_future_to_action",
         )
-        if self.action_probe_shuffled is not None:
+        if probe_state["shuffled"] is not None:
             logs = logs + self._run_action_probe(
-                self.action_probe_shuffled,
-                self.action_probe_shuffled_optimizer,
+                probe_state["shuffled"],
+                probe_state["shuffled_optimizer"],
                 z_flat,
                 target,
                 "z_future_to_action_shuffled",
                 shuffle=True,
             )
         return logs
+
+    @staticmethod
+    def _drop_action_probe_checkpoint_state(checkpoint: Dict) -> None:
+        state_dict = checkpoint.get("state_dict")
+        if state_dict is None:
+            return
+        for key in list(state_dict.keys()):
+            if key.startswith("action_probe") or key.startswith("_action_probe"):
+                state_dict.pop(key)
+
+    def on_save_checkpoint(self, checkpoint: Dict) -> None:
+        self._drop_action_probe_checkpoint_state(checkpoint)
+
+    def on_load_checkpoint(self, checkpoint: Dict) -> None:
+        self._drop_action_probe_checkpoint_state(checkpoint)
 
     def _compute_radprog_losses(self, outputs: Dict, batch: Dict) -> Tuple[Tensor, Tensor, Tuple]:
         output_keys = ("radprog_z_self", "radprog_z_mid", "radprog_z_future")
