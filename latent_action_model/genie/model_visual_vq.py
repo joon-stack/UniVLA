@@ -38,6 +38,14 @@ class VisualVQ_DINO_LAM(LightningModule):
         radprog_radial_weight: float = 0.0,
         radprog_progress_weight: float = 0.0,
         radprog_progress_alpha: float = 0.05,
+        hyperbolic_latent_enabled: bool = False,
+        hyperbolic_curvature: float = 1.0,
+        hyperbolic_prelift_mode: str = "none",
+        hyperbolic_prelift_scale: float = 1.0,
+        hyperbolic_tangent_max_norm: float = 0.0,
+        hyperbolic_lift_max_norm: float = 0.0,
+        hyperbolic_eps: float = 1e-5,
+        latent_output_global_scale: float = 1.0,
         action_probe_enabled: bool = False,
         action_probe_shuffle: bool = True,
         action_probe_lr: float = 1e-3,
@@ -66,6 +74,15 @@ class VisualVQ_DINO_LAM(LightningModule):
         self.radprog_radial_weight = radprog_radial_weight
         self.radprog_progress_weight = radprog_progress_weight
         self.radprog_progress_alpha = radprog_progress_alpha
+        self.hyperbolic_latent_enabled = hyperbolic_latent_enabled
+        self.hyperbolic_curvature = float(hyperbolic_curvature)
+        self.hyperbolic_prelift_mode = str(hyperbolic_prelift_mode).strip().lower()
+        self.hyperbolic_prelift_scale = float(hyperbolic_prelift_scale)
+        self.hyperbolic_tangent_max_norm = float(hyperbolic_tangent_max_norm)
+        self.hyperbolic_lift_max_norm = float(hyperbolic_lift_max_norm)
+        self.hyperbolic_eps = float(hyperbolic_eps)
+        self.latent_output_global_scale = float(latent_output_global_scale)
+        self._validate_hyperbolic_config()
         self.action_probe_enabled = action_probe_enabled
         self.action_probe_shuffle = action_probe_shuffle
         self.action_probe_lr = action_probe_lr
@@ -106,9 +123,76 @@ class VisualVQ_DINO_LAM(LightningModule):
     def _radprog_enabled(self) -> bool:
         return self.radprog_radial_weight > 0.0 or self.radprog_progress_weight > 0.0
 
+    def _validate_hyperbolic_config(self) -> None:
+        if self.hyperbolic_curvature <= 0.0:
+            raise ValueError(f"hyperbolic_curvature must be > 0, got {self.hyperbolic_curvature}.")
+        if self.hyperbolic_prelift_mode not in {"none", "scale"}:
+            raise ValueError(
+                "hyperbolic_prelift_mode must be one of {'none', 'scale'}, "
+                f"got {self.hyperbolic_prelift_mode!r}."
+            )
+        if self.hyperbolic_prelift_scale <= 0.0:
+            raise ValueError(f"hyperbolic_prelift_scale must be > 0, got {self.hyperbolic_prelift_scale}.")
+        if self.hyperbolic_tangent_max_norm < 0.0:
+            raise ValueError(
+                f"hyperbolic_tangent_max_norm must be >= 0, got {self.hyperbolic_tangent_max_norm}."
+            )
+        if self.hyperbolic_lift_max_norm < 0.0:
+            raise ValueError(f"hyperbolic_lift_max_norm must be >= 0, got {self.hyperbolic_lift_max_norm}.")
+        if self.hyperbolic_eps <= 0.0:
+            raise ValueError(f"hyperbolic_eps must be > 0, got {self.hyperbolic_eps}.")
+        if self.latent_output_global_scale <= 0.0:
+            raise ValueError(
+                f"latent_output_global_scale must be > 0, got {self.latent_output_global_scale}."
+            )
+
     def _masked_mean(self, values: Tensor, mask: Tensor) -> Tensor:
         mask = mask.to(device=values.device, dtype=values.dtype)
         return (values * mask).sum() / mask.sum().clamp_min(1.0)
+
+    def _clamp_norm(self, tensor: Tensor, max_norm: float) -> Tensor:
+        if max_norm <= 0.0:
+            return tensor
+        norm = tensor.norm(dim=-1, keepdim=True).clamp_min(self.hyperbolic_eps)
+        scale = torch.clamp(max_norm / norm, max=1.0)
+        return tensor * scale
+
+    def _hyperbolic_prelift_transform(self, tangent: Tensor) -> Tensor:
+        tangent = tangent * self.latent_output_global_scale
+        if self.hyperbolic_prelift_mode == "scale":
+            tangent = tangent * self.hyperbolic_prelift_scale
+        return self._clamp_norm(tangent, self.hyperbolic_tangent_max_norm)
+
+    def _poincare_project(self, point: Tensor) -> Tensor:
+        sqrt_c = self.hyperbolic_curvature ** 0.5
+        max_norm = (1.0 - self.hyperbolic_eps) / sqrt_c
+        return self._clamp_norm(point, max_norm)
+
+    def _poincare_expmap0(self, tangent: Tensor) -> Tensor:
+        tangent = self._clamp_norm(tangent, self.hyperbolic_lift_max_norm)
+        sqrt_c = self.hyperbolic_curvature ** 0.5
+        norm = tangent.norm(dim=-1, keepdim=True).clamp_min(self.hyperbolic_eps)
+        scale = torch.tanh(sqrt_c * norm) / (sqrt_c * norm)
+        return self._poincare_project(scale * tangent)
+
+    def _hyperbolic_lift(self, z: Tensor) -> Tuple[Tensor, Tensor]:
+        tangent = self._hyperbolic_prelift_transform(z)
+        return self._poincare_expmap0(tangent), tangent
+
+    def _poincare_dist0(self, point: Tensor) -> Tensor:
+        sqrt_c = self.hyperbolic_curvature ** 0.5
+        norm = point.norm(dim=-1).clamp_max((1.0 - self.hyperbolic_eps) / sqrt_c)
+        return 2.0 * torch.atanh(sqrt_c * norm) / sqrt_c
+
+    def _poincare_dist(self, x: Tensor, y: Tensor) -> Tensor:
+        c = self.hyperbolic_curvature
+        sqrt_c = c ** 0.5
+        x2 = (x * x).sum(dim=-1)
+        y2 = (y * y).sum(dim=-1)
+        diff2 = ((x - y) * (x - y)).sum(dim=-1)
+        denom = ((1.0 - c * x2) * (1.0 - c * y2)).clamp_min(self.hyperbolic_eps)
+        z = 1.0 + 2.0 * c * diff2 / denom
+        return torch.acosh(z.clamp_min(1.0 + self.hyperbolic_eps)) / sqrt_c
 
     def _future_latent_metrics(self, z_future: Tensor) -> Tuple:
         latent_r_future = torch.linalg.vector_norm(z_future, dim=-1).mean()
@@ -242,18 +326,37 @@ class VisualVQ_DINO_LAM(LightningModule):
         valid = batch["radprog_valid"].to(device=z_self.device, dtype=z_self.dtype)[:, None]
         valid = valid.expand_as(z_self[..., 0])
 
-        d_mid = torch.linalg.vector_norm(z_mid - z_self, dim=-1)
-        d_future = torch.linalg.vector_norm(z_future - z_self, dim=-1)
+        logs = ()
+        if self.hyperbolic_latent_enabled:
+            z_self_h, z_self_t = self._hyperbolic_lift(z_self)
+            z_mid_h, z_mid_t = self._hyperbolic_lift(z_mid)
+            z_future_h, z_future_t = self._hyperbolic_lift(z_future)
+            d_mid = self._poincare_dist(z_self_h, z_mid_h)
+            d_future = self._poincare_dist(z_self_h, z_future_h)
+            r_self = self._poincare_dist0(z_self_h)
+            r_mid = self._poincare_dist0(z_mid_h)
+            r_future = self._poincare_dist0(z_future_h)
+            logs = logs + (
+                ("radprog_hyperbolic_enabled", z_self.new_ones(())),
+                ("radprog_prelift_norm_self", self._masked_mean(z_self_t.norm(dim=-1), valid)),
+                ("radprog_prelift_norm_mid", self._masked_mean(z_mid_t.norm(dim=-1), valid)),
+                ("radprog_prelift_norm_future", self._masked_mean(z_future_t.norm(dim=-1), valid)),
+            )
+        else:
+            d_mid = torch.linalg.vector_norm(z_mid - z_self, dim=-1)
+            d_future = torch.linalg.vector_norm(z_future - z_self, dim=-1)
+            r_self = torch.linalg.vector_norm(z_self, dim=-1)
+            r_mid = torch.linalg.vector_norm(z_mid, dim=-1)
+            r_future = torch.linalg.vector_norm(z_future, dim=-1)
+            logs = logs + (("radprog_hyperbolic_enabled", z_self.new_zeros(())),)
+
         radial_loss = self._masked_mean(F.softplus(d_mid - d_future), valid)
 
-        r_self = torch.linalg.vector_norm(z_self, dim=-1)
-        r_mid = torch.linalg.vector_norm(z_mid, dim=-1)
-        r_future = torch.linalg.vector_norm(z_future, dim=-1)
         first_leg = F.softplus(self.radprog_progress_alpha * mid_offsets + r_self - r_mid)
         second_leg = F.softplus(self.radprog_progress_alpha * (future_offsets - mid_offsets) + r_mid - r_future)
         progress_loss = self._masked_mean(first_leg + second_leg, valid)
 
-        logs = (
+        logs = logs + (
             ("radprog_radial_loss", radial_loss),
             ("radprog_progress_loss", progress_loss),
             ("radprog_valid_frac", valid.mean()),

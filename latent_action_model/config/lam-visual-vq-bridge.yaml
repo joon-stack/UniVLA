@@ -13,6 +13,14 @@ model:
   radprog_radial_weight: 1.0
   radprog_progress_weight: 0.3
   radprog_progress_alpha: 0.05
+  hyperbolic_latent_enabled: true
+  hyperbolic_curvature: 1.0
+  hyperbolic_prelift_mode: scale
+  hyperbolic_prelift_scale: 0.15
+  hyperbolic_tangent_max_norm: 0.0
+  hyperbolic_lift_max_norm: 0.0
+  hyperbolic_eps: 1e-5
+  latent_output_global_scale: 1.0
   action_probe_enabled: true
   action_probe_shuffle: true
   action_probe_lr: 1e-3
@@ -24,7 +32,7 @@ model:
       lr: 1e-4
       weight_decay: 1e-2
 
-  task_name: visual_vq_lam_bridge_radprog
+  task_name: visual_vq_lam_bridge_hyperbolic_radprog
   make_data_pair: &make_data_pair false
 
 data:
@@ -53,7 +61,7 @@ trainer:
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs/visual_vq_lam_bridge_radprog
+        dirpath: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs/visual_vq_lam_bridge_hyperbolic_radprog
         verbose: true
         save_last: true
         save_top_k: -1
@@ -63,4 +71,4 @@ trainer:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
         save_dir: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs
-        name: visual_vq_lam_bridge_radprog
+        name: visual_vq_lam_bridge_hyperbolic_radprog
