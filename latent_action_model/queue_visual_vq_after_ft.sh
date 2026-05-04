@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -euo pipefail
+set -uo pipefail
 
 WAIT_SESSION="${WAIT_SESSION:-ft_lr1e4_vlamult01_4run_queue}"
 LOG_DIR="${LOG_DIR:-/NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs/hyperlam_queue_20260504}"
@@ -51,7 +51,10 @@ run_training() {
 }
 
 log "waiting for ${WAIT_SESSION} to finish"
-while tmux has-session -t "${WAIT_SESSION}" 2>/dev/null; do
+while true; do
+  if ! tmux has-session -t "${WAIT_SESSION}" 2>/dev/null; then
+    break
+  fi
   sleep 300
   log "still waiting for ${WAIT_SESSION}"
 done
@@ -62,8 +65,15 @@ run_training \
   "hyperbolic_radprog" \
   "${SCRIPT_DIR}/train_lam_bridge_visual_vq.sh" \
   "${LOG_DIR}/hyperbolic_radprog_train.log"
+hyperbolic_status=$?
+if [[ "${hyperbolic_status}" -ne 0 ]]; then
+  log "stopping queue because hyperbolic_radprog failed"
+  exit "${hyperbolic_status}"
+fi
 
 run_training \
   "euclidean_control" \
   "${SCRIPT_DIR}/train_lam_bridge_visual_vq_euclidean_control.sh" \
   "${LOG_DIR}/euclidean_control_train.log"
+control_status=$?
+exit "${control_status}"
