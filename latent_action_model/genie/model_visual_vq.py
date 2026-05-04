@@ -38,6 +38,9 @@ class VisualVQ_DINO_LAM(LightningModule):
         radprog_radial_weight: float = 0.0,
         radprog_progress_weight: float = 0.0,
         radprog_progress_alpha: float = 0.05,
+        action_probe_enabled: bool = False,
+        action_probe_shuffle: bool = True,
+        action_probe_lr: float = 1e-3,
         log_interval: int = 1000,
         log_path: str = "log_imgs",
         task_name: str = "visual_vq_lam_bridge",
@@ -63,6 +66,13 @@ class VisualVQ_DINO_LAM(LightningModule):
         self.radprog_radial_weight = radprog_radial_weight
         self.radprog_progress_weight = radprog_progress_weight
         self.radprog_progress_alpha = radprog_progress_alpha
+        self.action_probe_enabled = action_probe_enabled
+        self.action_probe_shuffle = action_probe_shuffle
+        self.action_probe_lr = action_probe_lr
+        self.action_probe = None
+        self.action_probe_optimizer = None
+        self.action_probe_shuffled = None
+        self.action_probe_shuffled_optimizer = None
         self.log_interval = log_interval
         self.log_path = log_path
         self.optimizer = optimizer
@@ -113,6 +123,74 @@ class VisualVQ_DINO_LAM(LightningModule):
             ("latent_batch_cosine", latent_batch_cosine),
             ("latent_batch_variance", latent_batch_variance),
         )
+
+    def _build_action_probe(self, z_dim: int, action_dim: int, device: torch.device) -> None:
+        self.action_probe = torch.nn.Linear(z_dim, action_dim).to(device)
+        self.action_probe_optimizer = torch.optim.Adam(self.action_probe.parameters(), lr=self.action_probe_lr)
+        if self.action_probe_shuffle:
+            self.action_probe_shuffled = torch.nn.Linear(z_dim, action_dim).to(device)
+            self.action_probe_shuffled_optimizer = torch.optim.Adam(
+                self.action_probe_shuffled.parameters(),
+                lr=self.action_probe_lr,
+            )
+
+    def _run_action_probe(
+        self,
+        probe: torch.nn.Module,
+        optimizer: torch.optim.Optimizer,
+        z_flat: Tensor,
+        target: Tensor,
+        name: str,
+        shuffle: bool = False,
+    ) -> Tuple:
+        if shuffle:
+            target = target[torch.randperm(z_flat.shape[0], device=z_flat.device)]
+
+        pred = probe(z_flat)
+        probe_loss = F.mse_loss(pred, target)
+        optimizer.zero_grad(set_to_none=True)
+        probe_loss.backward()
+        optimizer.step()
+
+        with torch.no_grad():
+            target_var = target.var(dim=0, unbiased=False).mean().clamp_min(1e-8)
+            probe_r2 = 1.0 - probe_loss.detach() / target_var
+        return (
+            (f"probe/{name}/l2", probe_loss.detach()),
+            (f"probe/{name}/r2", probe_r2.detach()),
+        )
+
+    def _action_probe_step(self, outputs: Dict, batch: Dict) -> Tuple:
+        if "action" not in batch:
+            return ()
+
+        batch_size = batch["action"].shape[0]
+        z_future = outputs.get("radprog_z_future", outputs["emb"])
+        if z_future.shape[0] != batch_size:
+            z_future = z_future.reshape(batch_size, -1, *z_future.shape[1:])[:, 0]
+
+        z_flat = z_future.detach().reshape(batch_size, -1)
+        target = batch["action"].to(device=z_flat.device, dtype=z_flat.dtype).reshape(batch_size, -1)
+        if self.action_probe is None:
+            self._build_action_probe(z_flat.shape[-1], target.shape[-1], z_flat.device)
+
+        logs = self._run_action_probe(
+            self.action_probe,
+            self.action_probe_optimizer,
+            z_flat,
+            target,
+            "z_future_to_action",
+        )
+        if self.action_probe_shuffled is not None:
+            logs = logs + self._run_action_probe(
+                self.action_probe_shuffled,
+                self.action_probe_shuffled_optimizer,
+                z_flat,
+                target,
+                "z_future_to_action_shuffled",
+                shuffle=True,
+            )
+        return logs
 
     def _compute_radprog_losses(self, outputs: Dict, batch: Dict) -> Tuple[Tensor, Tensor, Tuple]:
         output_keys = ("radprog_z_self", "radprog_z_mid", "radprog_z_future")
@@ -200,6 +278,8 @@ class VisualVQ_DINO_LAM(LightningModule):
             torch.cuda.synchronize()
             shared_start = time.perf_counter()
         outputs, loss, aux_losses = self.shared_step(batch)
+        if self.action_probe_enabled:
+            aux_losses = aux_losses + self._action_probe_step(outputs, batch)
         if self._profile_steps and batch_idx < self._profile_steps and torch.cuda.is_available():
             torch.cuda.synchronize()
             self._profile_shared_step = time.perf_counter() - shared_start

@@ -13,6 +13,9 @@ model:
   radprog_radial_weight: 1.0
   radprog_progress_weight: 0.3
   radprog_progress_alpha: 0.05
+  action_probe_enabled: true
+  action_probe_shuffle: true
+  action_probe_lr: 1e-3
   log_interval: 5000
   log_path: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs
   optimizer:
