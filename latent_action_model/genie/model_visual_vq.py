@@ -100,6 +100,7 @@ class VisualVQ_DINO_LAM(LightningModule):
     def _future_latent_metrics(self, z_future: Tensor) -> Tuple:
         latent_r_future = torch.linalg.vector_norm(z_future, dim=-1).mean()
         z_flat = z_future.reshape(z_future.shape[0], -1)
+        latent_batch_variance = z_flat.var(dim=0, unbiased=False).mean()
         if z_flat.shape[0] <= 1:
             latent_batch_cosine = z_flat.new_zeros(())
         else:
@@ -110,6 +111,7 @@ class VisualVQ_DINO_LAM(LightningModule):
         return (
             ("latent_r_future", latent_r_future),
             ("latent_batch_cosine", latent_batch_cosine),
+            ("latent_batch_variance", latent_batch_variance),
         )
 
     def _compute_radprog_losses(self, outputs: Dict, batch: Dict) -> Tuple[Tensor, Tensor, Tuple]:
