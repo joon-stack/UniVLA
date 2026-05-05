@@ -633,8 +633,6 @@ def make_interleaved_dataset(
     if batch_size is not None:
         dataset = dataset.batch(batch_size)
 
-    dataset = dataset.prefetch(tf.data.AUTOTUNE)
-
     # Note =>> Seems to reduce memory usage without affecting speed?
     ram_budget_mb = int(os.environ.get("UNIVLA_TF_RAM_BUDGET_MB", "1"))
     if ram_budget_mb > 0:
