@@ -32,7 +32,7 @@ model:
       lr: 1e-4
       weight_decay: 1e-2
 
-  task_name: visual_vq_lam_bridge_euclidean_control_hmax9_120k
+  task_name: visual_vq_lam_bridge_euclidean_control_hmax9_100k
   make_data_pair: &make_data_pair false
 
 data:
@@ -49,7 +49,7 @@ data:
 
 trainer:
   max_epochs: 20
-  max_steps: 120000
+  max_steps: 100000
   accelerator: gpu
   num_nodes: 1
   devices: 8
@@ -61,7 +61,7 @@ trainer:
   callbacks:
     - class_path: lightning.pytorch.callbacks.ModelCheckpoint
       init_args:
-        dirpath: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs/visual_vq_lam_bridge_euclidean_control_hmax9_120k
+        dirpath: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs/visual_vq_lam_bridge_euclidean_control_hmax9_100k
         verbose: true
         save_last: true
         save_top_k: -1
@@ -71,4 +71,4 @@ trainer:
     - class_path: lightning.pytorch.loggers.TensorBoardLogger
       init_args:
         save_dir: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs
-        name: visual_vq_lam_bridge_euclidean_control_hmax9_120k
+        name: visual_vq_lam_bridge_euclidean_control_hmax9_100k
