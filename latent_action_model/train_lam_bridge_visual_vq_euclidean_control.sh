@@ -15,6 +15,6 @@ echo "Using torchrun: ${TORCHRUN}"
 
 cd "${SCRIPT_DIR}"
 
-"${TORCHRUN}" --standalone --nnodes 1 --nproc-per-node 8 main_visual_vq.py fit \
+"${TORCHRUN}" --standalone --nnodes 1 --nproc-per-node "${LAM_NPROC_PER_NODE:-8}" main_visual_vq.py fit \
   --config config/lam-visual-vq-bridge-euclidean-control.yaml \
   "$@"
