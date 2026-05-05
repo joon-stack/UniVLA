@@ -321,9 +321,13 @@ class VisualVQ_DINO_LAM(LightningModule):
                 f"self={tuple(z_self.shape)}, mid={tuple(z_mid.shape)}, future={tuple(z_future.shape)}"
             )
 
-        mid_offsets = batch["radprog_mid_offsets"].to(device=z_self.device, dtype=z_self.dtype)[:, None]
-        future_offsets = batch["radprog_future_offsets"].to(device=z_self.device, dtype=z_self.dtype)[:, None]
-        valid = batch["radprog_valid"].to(device=z_self.device, dtype=z_self.dtype)[:, None]
+        compute_dtype = torch.float32 if self.hyperbolic_latent_enabled else z_self.dtype
+        z_self = z_self.to(dtype=compute_dtype)
+        z_mid = z_mid.to(dtype=compute_dtype)
+        z_future = z_future.to(dtype=compute_dtype)
+        mid_offsets = batch["radprog_mid_offsets"].to(device=z_self.device, dtype=compute_dtype)[:, None]
+        future_offsets = batch["radprog_future_offsets"].to(device=z_self.device, dtype=compute_dtype)[:, None]
+        valid = batch["radprog_valid"].to(device=z_self.device, dtype=compute_dtype)[:, None]
         valid = valid.expand_as(z_self[..., 0])
 
         logs = ()
@@ -331,11 +335,11 @@ class VisualVQ_DINO_LAM(LightningModule):
             z_self_h, z_self_t = self._hyperbolic_lift(z_self)
             z_mid_h, z_mid_t = self._hyperbolic_lift(z_mid)
             z_future_h, z_future_t = self._hyperbolic_lift(z_future)
-            d_mid = self._poincare_dist(z_self_h, z_mid_h)
-            d_future = self._poincare_dist(z_self_h, z_future_h)
-            r_self = self._poincare_dist0(z_self_h)
-            r_mid = self._poincare_dist0(z_mid_h)
-            r_future = self._poincare_dist0(z_future_h)
+            d_mid = torch.nan_to_num(self._poincare_dist(z_self_h, z_mid_h), nan=0.0, posinf=1e4, neginf=0.0)
+            d_future = torch.nan_to_num(self._poincare_dist(z_self_h, z_future_h), nan=0.0, posinf=1e4, neginf=0.0)
+            r_self = torch.nan_to_num(self._poincare_dist0(z_self_h), nan=0.0, posinf=1e4, neginf=0.0)
+            r_mid = torch.nan_to_num(self._poincare_dist0(z_mid_h), nan=0.0, posinf=1e4, neginf=0.0)
+            r_future = torch.nan_to_num(self._poincare_dist0(z_future_h), nan=0.0, posinf=1e4, neginf=0.0)
             logs = logs + (
                 ("radprog_hyperbolic_enabled", z_self.new_ones(())),
                 ("radprog_prelift_norm_self", self._masked_mean(z_self_t.norm(dim=-1), valid)),
@@ -350,10 +354,12 @@ class VisualVQ_DINO_LAM(LightningModule):
             r_future = torch.linalg.vector_norm(z_future, dim=-1)
             logs = logs + (("radprog_hyperbolic_enabled", z_self.new_zeros(())),)
 
-        radial_loss = self._masked_mean(F.softplus(d_mid - d_future), valid)
+        radial_loss = self._masked_mean(F.softplus((d_mid - d_future).clamp(min=-50.0, max=50.0)), valid)
 
-        first_leg = F.softplus(self.radprog_progress_alpha * mid_offsets + r_self - r_mid)
-        second_leg = F.softplus(self.radprog_progress_alpha * (future_offsets - mid_offsets) + r_mid - r_future)
+        first_leg_arg = self.radprog_progress_alpha * mid_offsets + r_self - r_mid
+        second_leg_arg = self.radprog_progress_alpha * (future_offsets - mid_offsets) + r_mid - r_future
+        first_leg = F.softplus(first_leg_arg.clamp(min=-50.0, max=50.0))
+        second_leg = F.softplus(second_leg_arg.clamp(min=-50.0, max=50.0))
         progress_loss = self._masked_mean(first_leg + second_leg, valid)
 
         logs = logs + (
