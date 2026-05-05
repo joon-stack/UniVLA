@@ -19,4 +19,5 @@ cli = LightningCLI(
     VisualVQ_DINO_LAM,
     LightningOpenX,
     seed_everything_default=42,
+    save_config_kwargs={"overwrite": True},
 )
