@@ -1,6 +1,10 @@
 import sys
 from pathlib import Path
 
+import tensorflow as tf
+
+tf.config.set_visible_devices([], "GPU")
+
 from lightning.pytorch.cli import LightningCLI
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
