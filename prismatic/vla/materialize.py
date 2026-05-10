@@ -73,6 +73,8 @@ def get_latent_vla_dataset_and_collator(
     default_image_resolution: Tuple[int, int, int],
     padding_side: str = "right",
     predict_stop_token: bool = True,
+    latent_action_token_len: int = 0,
+    lam_token_view: str = "indices",
     shuffle_buffer_size: int = 100_000,
     train: bool = True,
     episodic: bool = False,
@@ -93,6 +95,8 @@ def get_latent_vla_dataset_and_collator(
         prompt_builder_fn=prompt_builder_fn,
         padding_side=padding_side,
         predict_stop_token=predict_stop_token,
+        latent_action_token_len=latent_action_token_len,
+        lam_token_view=lam_token_view,
     )
 
 

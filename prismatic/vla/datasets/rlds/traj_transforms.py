@@ -6,6 +6,7 @@ that represents a single trajectory, meaning each tensor has the same leading di
 """
 
 import logging
+import os
 from typing import Dict
 
 import tensorflow as tf
@@ -16,11 +17,25 @@ def chunk_act_obs(traj, window_size, future_action_window_size, lam_random_horiz
 
     first_indices = tf.range(traj_len)[:, None]
     if lam_random_horizon:
-        future_offsets = tf.random.uniform([traj_len, 1], minval=2, maxval=lam_window_size, dtype=tf.int32)
-        mid_offsets = tf.cast(
-            tf.floor(tf.random.uniform([traj_len, 1]) * tf.cast(future_offsets - 1, tf.float32)),
-            tf.int32,
-        ) + 1
+        force_h2_offset = os.environ.get("UNIVLA_LAM_FORCE_H2_OFFSET")
+        if force_h2_offset:
+            force_h2_offset = int(force_h2_offset)
+            if force_h2_offset < 0 or force_h2_offset >= lam_window_size:
+                raise ValueError(
+                    "UNIVLA_LAM_FORCE_H2_OFFSET must satisfy "
+                    f"0 <= value < lam_window_size ({lam_window_size}), got {force_h2_offset}."
+                )
+            future_offsets = tf.fill([traj_len, 1], tf.cast(force_h2_offset, tf.int32))
+            mid_offsets = tf.fill(
+                [traj_len, 1],
+                tf.cast(max(0, min(force_h2_offset, 1)), tf.int32),
+            )
+        else:
+            future_offsets = tf.random.uniform([traj_len, 1], minval=2, maxval=lam_window_size, dtype=tf.int32)
+            mid_offsets = tf.cast(
+                tf.floor(tf.random.uniform([traj_len, 1]) * tf.cast(future_offsets - 1, tf.float32)),
+                tf.int32,
+            ) + 1
         chunk_indices = tf.concat(
             [first_indices, first_indices + mid_offsets, first_indices + future_offsets],
             axis=1,
@@ -41,8 +56,22 @@ def chunk_act_obs(traj, window_size, future_action_window_size, lam_random_horiz
     else:
         goal_timestep = tf.fill([traj_len], traj_len - 1)
 
-
     floored_action_chunk_indices = tf.minimum(tf.maximum(action_chunk_indices, 0), goal_timestep[:, None])
+    if lam_random_horizon:
+        future_action_indices = first_indices + future_offsets
+        floored_future_action_indices = tf.minimum(
+            tf.maximum(future_action_indices, 0),
+            goal_timestep[:, None],
+        )
+        radprog_future_action = tf.gather(traj["action"], floored_future_action_indices)[:, 0]
+        sequence_offsets = tf.range(lam_window_size, dtype=tf.int32)[None, :]
+        sequence_indices = first_indices + sequence_offsets
+        sequence_mask = sequence_offsets <= future_offsets
+        floored_sequence_indices = tf.minimum(
+            tf.maximum(sequence_indices, 0),
+            goal_timestep[:, None],
+        )
+        radprog_action_sequence = tf.gather(traj["action"], floored_sequence_indices)
 
     traj["observation"] = tf.nest.map_structure(lambda x: tf.gather(x, floored_chunk_indices), traj["observation"])
     traj["action"] = tf.gather(traj["action"], floored_action_chunk_indices)
@@ -69,6 +98,35 @@ def chunk_act_obs(traj, window_size, future_action_window_size, lam_random_horiz
     # Actions past the goal timestep become neutral
     action_past_goal = action_chunk_indices > goal_timestep[:, None]
     traj["action"] = tf.where(action_past_goal[:, :, None], neutral_actions, traj["action"])
+    if lam_random_horizon:
+        future_action_past_goal = future_action_indices > goal_timestep[:, None]
+        neutral_future_action = tf.where(
+            absolute_action_mask,
+            radprog_future_action,
+            tf.zeros_like(radprog_future_action),
+        )
+        traj["task"]["radprog_future_action"] = tf.where(
+            future_action_past_goal,
+            neutral_future_action,
+            radprog_future_action,
+        )
+        sequence_past_goal = sequence_indices > goal_timestep[:, None]
+        neutral_action_sequence = tf.where(
+            absolute_action_mask[:, None, :],
+            radprog_action_sequence,
+            tf.zeros_like(radprog_action_sequence),
+        )
+        radprog_action_sequence = tf.where(
+            sequence_past_goal[:, :, None],
+            neutral_action_sequence,
+            radprog_action_sequence,
+        )
+        traj["task"]["radprog_action_sequence"] = tf.where(
+            sequence_mask[:, :, None],
+            radprog_action_sequence,
+            tf.zeros_like(radprog_action_sequence),
+        )
+        traj["task"]["radprog_action_sequence_mask"] = sequence_mask
 
     return traj
 
@@ -147,7 +205,13 @@ def chunk_act_obs_random_horizon(traj, window_size, future_action_window_size):
     return traj
 
 
-def chunk_act_obs_libero(traj: Dict, window_size: int, future_action_window_size: int = 0) -> Dict:
+def chunk_act_obs_libero(
+    traj: Dict,
+    window_size: int,
+    future_action_window_size: int = 0,
+    lam_random_horizon: bool = False,
+    lam_window_size: int = 10,
+) -> Dict:
     """
     Chunks actions and observations into the given window_size.
 

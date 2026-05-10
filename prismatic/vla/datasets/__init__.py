@@ -5,3 +5,4 @@ from .datasets import DummyDataset, EpisodicRLDSDataset, RLDSBatchTransform, \
                       RLDSBatchTransformLIBERO_withHis
 from .calvin_dataset import DiskCalvinDataset
 from .r2r_dataset import DiskR2RDataset
+from .lerobot_cache_dataset import LeRobotWindowCacheDataset

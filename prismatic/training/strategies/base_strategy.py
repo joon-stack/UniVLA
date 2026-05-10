@@ -257,13 +257,14 @@ class TrainingStrategy(ABC):
         assert isinstance(vla_dataset, IterableDataset), "VLA training expects an IterableDataset!"
         assert self.grad_accumulation_steps == 1, "VLA training does not support gradient accumulation!"
 
-        # Create a DataLoader =>> Set `num_workers` to 0; RLDS loader handles parallelism!
+        # Create a DataLoader =>> Keep `num_workers` at 0 by default; RLDS handles input parallelism, and latent
+        # action collation may run a CUDA LAM.
         dataloader = DataLoader(
             vla_dataset,
             batch_size=self.per_device_batch_size,
             sampler=None,
             collate_fn=collator,
-            num_workers=0,
+            num_workers=int(os.environ.get("UNIVLA_VLA_DATALOADER_WORKERS", "0")),
             worker_init_fn=self.worker_init_fn,
         )
 
@@ -410,13 +411,14 @@ class TrainingStrategy(ABC):
         assert isinstance(vla_dataset, IterableDataset), "VLA training expects an IterableDataset!"
         assert self.grad_accumulation_steps == 1, "VLA training does not support gradient accumulation!"
 
-        # Create a DataLoader =>> Set `num_workers` to 0; RLDS loader handles parallelism!
+        # Create a DataLoader =>> Keep `num_workers` at 0 by default; RLDS handles input parallelism, and latent
+        # action collation may run a CUDA LAM.
         dataloader = DataLoader(
             vla_dataset,
             batch_size=self.per_device_batch_size,
             sampler=None,
             collate_fn=collator,
-            num_workers=0,
+            num_workers=int(os.environ.get("UNIVLA_VLA_DATALOADER_WORKERS", "0")),
             worker_init_fn=self.worker_init_fn,
         )
 
@@ -489,6 +491,26 @@ class TrainingStrategy(ABC):
                 # Compute Accuracy
                 correct_preds = (action_preds == action_gt) & mask
                 action_accuracy = correct_preds.sum().float() / mask.sum().float()
+                factorized_accuracy_metrics = {}
+                latent_action_token_len = int(batch.get("latent_action_token_len", 0) or 0)
+                if latent_action_token_len == 5:
+                    action_token_pos = mask.long().cumsum(dim=1) - 1
+
+                    def masked_accuracy(metric_mask: torch.Tensor) -> torch.Tensor:
+                        denom = metric_mask.sum()
+                        if denom.item() == 0:
+                            return torch.zeros((), device=action_preds.device)
+                        return correct_preds[metric_mask].float().sum() / denom.float()
+
+                    radius_mask = mask & (action_token_pos == 0)
+                    direction_mask = mask & (action_token_pos > 0) & (action_token_pos < latent_action_token_len)
+                    factorized_accuracy_metrics["radius_accuracy"] = masked_accuracy(radius_mask)
+                    factorized_accuracy_metrics["direction_accuracy"] = masked_accuracy(direction_mask)
+                    for direction_idx in range(1, latent_action_token_len):
+                        direction_slot_mask = mask & (action_token_pos == direction_idx)
+                        factorized_accuracy_metrics[f"direction_{direction_idx}_accuracy"] = masked_accuracy(
+                            direction_slot_mask
+                        )
 
                 # Compute L1 Loss on Predicted (Continuous) Actions
                 # continuous_actions_pred = torch.tensor(
@@ -502,7 +524,12 @@ class TrainingStrategy(ABC):
                 # l1 loss omitted for latent action 
                 action_l1_loss = torch.tensor(0.)
                 # Commit Metrics
-                metrics.commit(action_accuracy=action_accuracy, l1_loss=action_l1_loss, update_step_time=True)
+                metrics.commit(
+                    action_accuracy=action_accuracy,
+                    l1_loss=action_l1_loss,
+                    update_step_time=True,
+                    **factorized_accuracy_metrics,
+                )
                 sync_cuda()
                 metrics_done = time.perf_counter()
 

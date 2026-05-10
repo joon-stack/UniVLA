@@ -11,6 +11,7 @@ from typing import Any, Dict, Tuple, Type
 
 import os
 import random
+import time
 import numpy as np
 import torch
 from PIL import Image
@@ -104,6 +105,22 @@ class RLDSBatchTransformLIBERO_withHis:
 
         input_img = Image.fromarray(rlds_batch["observation"]["image_primary"][randomized_overlap])
         pixel_values = self.image_transform(input_img)
+
+        if os.environ.get("UNIVLA_BATCH_LAM_IN_COLLATOR", "0") == "1":
+            target_img = Image.fromarray(
+                rlds_batch["observation"]["image_primary"][self.window_size - 1 + randomized_overlap]
+            )
+            return dict(
+                pixel_values=pixel_values,
+                lam_initial_pixel_values=self.image_transform_lam(input_img),
+                lam_target_pixel_values=self.image_transform_lam(target_img),
+                hist_lam_initial_pixel_values=self.image_transform_lam(img),
+                hist_lam_target_pixel_values=self.image_transform_lam(img_k),
+                has_history=np.array(randomized_overlap > 0, dtype=np.bool_),
+                lang=lang,
+                actions=rlds_batch["action"][randomized_overlap: self.window_size + randomized_overlap],
+                dataset_name=dataset_name,
+            )
 
         with torch.no_grad():
             initial_pixel_values = self.image_transform_lam(input_img)
@@ -329,6 +346,12 @@ class RLDSBatchTransformVideo:
                 radprog_mid_offsets=np.array(rlds_batch["task"]["radprog_mid_offsets"], dtype=np.int64),
                 radprog_future_offsets=np.array(rlds_batch["task"]["radprog_future_offsets"], dtype=np.int64),
                 radprog_valid=np.array(rlds_batch["task"]["radprog_valid"], dtype=np.float32),
+                radprog_future_action=np.array(rlds_batch["task"]["radprog_future_action"], dtype=np.float32),
+                radprog_action_sequence=np.array(rlds_batch["task"]["radprog_action_sequence"], dtype=np.float32),
+                radprog_action_sequence_mask=np.array(
+                    rlds_batch["task"]["radprog_action_sequence_mask"],
+                    dtype=np.float32,
+                ),
             )
 
         return output
@@ -423,8 +446,25 @@ class RLDSDataset(IterableDataset):
         worker_info = get_worker_info()
         if worker_info is not None:
             dataset = dataset.shard(worker_info.num_workers, worker_info.id)
-        for rlds_batch in dataset.as_numpy_iterator():
-            yield self.batch_transform(rlds_batch)
+        profile_enabled = int(os.environ.get("UNIVLA_LAM_PROFILE_STEPS", "0")) > 0
+        iterator = dataset.as_numpy_iterator()
+        while True:
+            next_start = time.perf_counter() if profile_enabled else None
+            try:
+                rlds_batch = next(iterator)
+            except StopIteration:
+                return
+            next_done = time.perf_counter() if profile_enabled else None
+
+            transform_start = time.perf_counter() if profile_enabled else None
+            out = self.batch_transform(rlds_batch)
+            if profile_enabled:
+                transform_done = time.perf_counter()
+                out["_profile"] = {
+                    "rlds_next_s": next_done - next_start,
+                    "batch_transform_s": transform_done - transform_start,
+                }
+            yield out
 
     def __len__(self) -> int:
         length_override = os.environ.get("UNIVLA_RLDS_LEN_OVERRIDE")

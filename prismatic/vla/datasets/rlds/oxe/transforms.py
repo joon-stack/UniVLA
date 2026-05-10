@@ -90,6 +90,11 @@ def bridge_orig_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     return trajectory
 
 
+def simpler_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
+    trajectory["language_instruction"] = trajectory["observation"]["language_instruction"]
+    return trajectory
+
+
 def ppgm_dataset_transform(trajectory: Dict[str, Any]) -> Dict[str, Any]:
     trajectory["action"] = tf.concat(
         [
@@ -884,6 +889,10 @@ OXE_STANDARDIZATION_TRANSFORMS = {
     "bridge_oxe": bridge_oxe_dataset_transform,
     "bridge_orig": bridge_orig_dataset_transform,
     "bridge_dataset": bridge_orig_dataset_transform,
+    "carrot": simpler_dataset_transform,
+    "eggplant": simpler_dataset_transform,
+    "spoon": simpler_dataset_transform,
+    "stack": simpler_dataset_transform,
     "ppgm": ppgm_dataset_transform,
     "ppgm_static": ppgm_dataset_transform,
     "ppgm_wrist": ppgm_dataset_transform,

@@ -39,6 +39,10 @@ class TrainConfig:
     lam_path: str = "latent_action_model/logs/task_centric_lam_stage2/epoch=0-step=200000.ckpt"
 
     # LAM setting
+    lam_kind: str = "controllable"
+    lam_config_path: Optional[Path] = None
+    lam_token_view: str = "indices"
+    latent_action_token_len: int = 4
     codebook_size: int = 16
     lam_model_dim: int = 768
     lam_latent_dim: int = 128
@@ -96,6 +100,86 @@ class TrainConfig:
         ), f"Expected World Size = {self.vla.expected_world_size} but Found {overwatch.world_size()} GPUs!"
 
     # fmt: on
+
+
+def _load_lam_state_dict(lam_path: str) -> dict:
+    lam_ckpt = torch.load(lam_path, map_location="cpu")["state_dict"]
+    return {key.replace("lam.", ""): value for key, value in lam_ckpt.items()}
+
+
+def _expected_lam_token_len(lam_vq_type: str, lam_num_codes: int, lam_token_view: str) -> int:
+    lam_token_view = (lam_token_view or "indices").strip().lower()
+    if lam_token_view == "indices":
+        return lam_num_codes + 1 if lam_vq_type == "factorized" else lam_num_codes
+    if lam_token_view == "factorized_direction":
+        if lam_vq_type != "factorized":
+            raise ValueError("lam_token_view='factorized_direction' requires vq_type='factorized'.")
+        return lam_num_codes
+    raise ValueError(f"Unsupported lam_token_view={lam_token_view!r}.")
+
+
+def _build_latent_action_model(cfg: TrainConfig) -> torch.nn.Module:
+    if cfg.lam_kind == "controllable":
+        from latent_action_model.genie.modules.lam import ControllableDINOLatentActionModel
+
+        latent_action_model = ControllableDINOLatentActionModel(
+            in_dim=3,
+            model_dim=cfg.lam_model_dim,
+            latent_dim=cfg.lam_latent_dim,
+            num_latents=cfg.codebook_size,
+            patch_size=cfg.lam_patch_size,
+            enc_blocks=cfg.lam_enc_blocks,
+            dec_blocks=cfg.lam_dec_blocks,
+            num_heads=cfg.lam_num_heads,
+            dropout=0.,
+        )
+    elif cfg.lam_kind == "visual_vq_factorized":
+        if cfg.lam_config_path is None:
+            raise ValueError("lam_config_path is required when lam_kind='visual_vq_factorized'.")
+        from latent_action_model.genie.modules.lam_visual_vq import VisualVQDINOLatentActionModel
+
+        with open(cfg.lam_config_path, "r") as f:
+            lam_model_cfg = yaml.safe_load(f)["model"]
+        lam_vq_type = str(lam_model_cfg.get("vq_type", "standard")).strip().lower()
+        lam_num_codes = int(lam_model_cfg.get("lam_num_codes", 4))
+        expected_token_len = _expected_lam_token_len(lam_vq_type, lam_num_codes, cfg.lam_token_view)
+        if cfg.latent_action_token_len > 0 and cfg.latent_action_token_len != expected_token_len:
+            raise ValueError(
+                "latent_action_token_len must match the LAM config: "
+                f"got {cfg.latent_action_token_len}, expected {expected_token_len} "
+                f"for vq_type={lam_vq_type!r}, lam_num_codes={lam_num_codes}, "
+                f"lam_token_view={cfg.lam_token_view!r}."
+            )
+        latent_action_model = VisualVQDINOLatentActionModel(
+            in_dim=lam_model_cfg.get("image_channels", 3),
+            model_dim=lam_model_cfg["lam_model_dim"],
+            latent_dim=lam_model_cfg["lam_latent_dim"],
+            num_latents=lam_model_cfg["lam_num_latents"],
+            num_codes=lam_num_codes,
+            patch_size=lam_model_cfg["lam_patch_size"],
+            enc_blocks=lam_model_cfg["lam_enc_blocks"],
+            dec_blocks=lam_model_cfg["lam_dec_blocks"],
+            num_heads=lam_model_cfg["lam_num_heads"],
+            dropout=lam_model_cfg.get("lam_dropout", 0.),
+            hyperbolic_action_prelift_enabled=lam_model_cfg.get("hyperbolic_latent_enabled", False),
+            hyperbolic_curvature=lam_model_cfg.get("hyperbolic_curvature", 1.0),
+            hyperbolic_prelift_mode=lam_model_cfg.get("hyperbolic_prelift_mode", "none"),
+            hyperbolic_prelift_scale=lam_model_cfg.get("hyperbolic_prelift_scale", 1.0),
+            hyperbolic_tangent_max_norm=lam_model_cfg.get("hyperbolic_tangent_max_norm", 0.0),
+            hyperbolic_lift_max_norm=lam_model_cfg.get("hyperbolic_lift_max_norm", 0.0),
+            hyperbolic_eps=lam_model_cfg.get("hyperbolic_eps", 1e-5),
+            latent_output_global_scale=lam_model_cfg.get("latent_output_global_scale", 1.0),
+            use_vq=lam_model_cfg.get("use_vq", True),
+            vq_type=lam_vq_type,
+            factorized_vq_num_radius=lam_model_cfg.get("factorized_vq_num_radius", 4),
+            factorized_vq_num_directions=lam_model_cfg.get("factorized_vq_num_directions", 4),
+            factorized_vq_radius_values=lam_model_cfg.get("factorized_vq_radius_values"),
+        )
+    else:
+        raise ValueError(f"Unsupported lam_kind={cfg.lam_kind!r}.")
+
+    latent_action_model.load_state_dict(_load_lam_state_dict(cfg.lam_path), strict=True)
+    return latent_action_model
 
 
 @draccus.wrap()
@@ -183,27 +267,7 @@ def train(cfg: TrainConfig) -> None:
         f"# Parameters (in millions): {num_params / 10**6:.3f} Total, {num_trainable_params / 10**6:.3f} Trainable"
     )
     
-    from latent_action_model.genie.modules.lam import ControllableDINOLatentActionModel
-
-    latent_action_model = ControllableDINOLatentActionModel(
-        in_dim=3,
-        model_dim=cfg.lam_model_dim,
-        latent_dim=cfg.lam_latent_dim,
-        num_latents=cfg.codebook_size,
-        patch_size=cfg.lam_patch_size,
-        enc_blocks=cfg.lam_enc_blocks,
-        dec_blocks=cfg.lam_dec_blocks,
-        num_heads=cfg.lam_num_heads,
-        dropout=0.,
-    )
-
-    lam_ckpt = torch.load(cfg.lam_path)['state_dict']
-    new_ckpt = {}
-    for key in lam_ckpt.keys():
-        new_ckpt[key.replace("lam.", "")] = lam_ckpt[key]
-
-    latent_action_model.load_state_dict(new_ckpt, strict=True)
-    latent_action_model = latent_action_model.to(device_id).eval()
+    latent_action_model = _build_latent_action_model(cfg).to(device_id).eval()
 
     # Get VLA Dataset & Collator
     overwatch.info(f"Creating VLA Open-X Dataset with Mixture `{cfg.vla.data_mix}`")
@@ -216,6 +280,8 @@ def train(cfg: TrainConfig) -> None:
         tokenizer=vlm.llm_backbone.get_tokenizer(),
         prompt_builder_fn=vlm.llm_backbone.prompt_builder_fn,
         default_image_resolution=vlm.vision_backbone.default_image_resolution,
+        latent_action_token_len=cfg.latent_action_token_len,
+        lam_token_view=cfg.lam_token_view,
         shuffle_buffer_size=cfg.vla.shuffle_buffer_size,
         image_aug=cfg.image_aug,
     )

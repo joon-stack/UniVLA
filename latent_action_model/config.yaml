@@ -1,0 +1,168 @@
+# lightning.pytorch==2.4.0
+seed_everything: 42
+trainer:
+  accelerator: gpu
+  strategy: ddp_find_unused_parameters_false
+  devices: 8
+  num_nodes: 1
+  precision: 16-mixed
+  logger:
+  - class_path: lightning.pytorch.loggers.WandbLogger
+    init_args:
+      name: visual_vq_lam_bridge_euclidean_plain_4tokens_k32_30k_8gpu_b64_global512_workers2
+      save_dir: .
+      version: null
+      offline: false
+      dir: null
+      id: null
+      anonymous: null
+      project: univla_lam_bridge
+      log_model: false
+      experiment: null
+      prefix: ''
+      checkpoint_name: null
+      entity: joonstack
+      notes: null
+      tags: null
+      config: null
+      config_exclude_keys: null
+      config_include_keys: null
+      allow_val_change: null
+      group: null
+      job_type: null
+      mode: null
+      force: null
+      reinit: null
+      resume: null
+      resume_from: null
+      fork_from: null
+      save_code: null
+      tensorboard: null
+      sync_tensorboard: null
+      monitor_gym: null
+      settings: null
+  callbacks:
+  - class_path: lightning.pytorch.callbacks.ModelCheckpoint
+    init_args:
+      dirpath: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs/visual_vq_lam_bridge_euclidean_plain_4tokens_k32_30k_8gpu_b64_global512_workers2
+      filename: null
+      monitor: null
+      verbose: true
+      save_last: true
+      save_top_k: -1
+      save_weights_only: false
+      mode: min
+      auto_insert_metric_name: true
+      every_n_train_steps: 10000
+      train_time_interval: null
+      every_n_epochs: null
+      save_on_train_epoch_end: null
+      enable_version_counter: true
+  fast_dev_run: false
+  max_epochs: 20
+  min_epochs: null
+  max_steps: 30000
+  min_steps: null
+  max_time: null
+  limit_train_batches: null
+  limit_val_batches: null
+  limit_test_batches: null
+  limit_predict_batches: null
+  overfit_batches: 0.0
+  val_check_interval: null
+  check_val_every_n_epoch: 1
+  num_sanity_val_steps: null
+  log_every_n_steps: 1
+  enable_checkpointing: null
+  enable_progress_bar: null
+  enable_model_summary: null
+  accumulate_grad_batches: 1
+  gradient_clip_val: 0.1
+  gradient_clip_algorithm: null
+  deterministic: null
+  benchmark: null
+  inference_mode: true
+  use_distributed_sampler: true
+  profiler: null
+  detect_anomaly: false
+  barebones: false
+  plugins: null
+  sync_batchnorm: false
+  reload_dataloaders_every_n_epochs: 0
+  default_root_dir: null
+model:
+  image_channels: 3
+  lam_model_dim: 768
+  lam_latent_dim: 128
+  lam_num_latents: 32
+  lam_num_codes: 4
+  lam_patch_size: 14
+  lam_enc_blocks: 12
+  lam_dec_blocks: 12
+  lam_num_heads: 12
+  lam_dropout: 0.0
+  use_vq: true
+  vq_type: standard
+  factorized_vq_num_radius: 4
+  factorized_vq_num_directions: 4
+  factorized_vq_radius_values: null
+  vq_beta: 0.25
+  vq_restart_interval_steps: 10000
+  radprog_radial_weight: 0.0
+  radprog_progress_weight: 0.0
+  radprog_codebook_aux_weight: 0.0
+  radprog_warmup_steps: 0
+  radprog_progress_alpha: 0.05
+  hyperbolic_latent_enabled: false
+  hyperbolic_curvature: 1.0
+  hyperbolic_prelift_mode: none
+  hyperbolic_prelift_scale: 1.0
+  hyperbolic_tangent_max_norm: 0.0
+  hyperbolic_lift_max_norm: 0.0
+  hyperbolic_eps: 1.0e-05
+  latent_output_global_scale: 1.0
+  action_probe_enabled: true
+  action_probe_shuffle: true
+  action_probe_lr: 0.001
+  log_interval: 5000
+  log_path: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs
+  task_name: visual_vq_lam_bridge_euclidean_plain_4tokens_k32_30k_8gpu_b64_global512_workers2
+  optimizer:
+    class_path: torch.optim.AdamW
+    init_args:
+      lr: 0.0001
+      betas:
+      - 0.9
+      - 0.999
+      eps: 1.0e-08
+      weight_decay: 0.01
+      amsgrad: false
+      maximize: false
+      foreach: null
+      capturable: false
+      differentiable: false
+      fused: null
+  make_data_pair: false
+data:
+  data_root: /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/data/rlds_bridge_orig
+  data_mix: bridge
+  batch_size: 64
+  resolution: 224
+  num_frames: 16
+  lam_window_size: 10
+  lam_random_horizon: true
+  episodic: false
+  shuffle_buffer_size: 20000
+  image_aug: true
+  num_workers: 64
+  train_shuffle: true
+  val_shuffle: false
+  val_batch_size: null
+  worker_init_fn: null
+  collate_fn: null
+  train_sampler: null
+  test_sampler: null
+  val_sampler: null
+optimizer: null
+lr_scheduler: null
+ckpt_path: null

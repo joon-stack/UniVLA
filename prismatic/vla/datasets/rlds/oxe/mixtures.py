@@ -15,6 +15,13 @@ OXE_NAMED_MIXTURES: Dict[str, List[Tuple[str, float]]] = {
         ("bridge_dataset", 1.0),                                  # Local Original Bridge V2 TFDS directory
     ],
 
+    "simpler": [
+        ("carrot", 1.0),
+        ("eggplant", 1.0),
+        ("spoon", 1.0),
+        ("stack", 1.0),
+    ],
+
     "droid": [
         ("droid", 1.0),
     ],

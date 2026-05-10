@@ -246,6 +246,12 @@ class VLAMetrics:
             "loss": deque(maxlen=window_size),
             "l1_loss": deque(maxlen=window_size),
             "action_accuracy": deque(maxlen=window_size),
+            "radius_accuracy": deque(maxlen=window_size),
+            "direction_accuracy": deque(maxlen=window_size),
+            "direction_1_accuracy": deque(maxlen=window_size),
+            "direction_2_accuracy": deque(maxlen=window_size),
+            "direction_3_accuracy": deque(maxlen=window_size),
+            "direction_4_accuracy": deque(maxlen=window_size),
             "step_time": deque(maxlen=window_size),
             "lr": [],
         }
@@ -314,6 +320,21 @@ class VLAMetrics:
         action_accuracy = torch.stack(list(self.state["action_accuracy"])).mean().item()
         step_time, lr = np.mean(list(self.state["step_time"])), self.state["lr"][-1]
         status = self.get_status(loss)
+        latent_action_metrics = {}
+        if len(self.state["radius_accuracy"]) > 0:
+            latent_action_metrics[f"VLA Train/Radius Token Accuracy"] = (
+                torch.stack(list(self.state["radius_accuracy"])).mean().item()
+            )
+        if len(self.state["direction_accuracy"]) > 0:
+            latent_action_metrics[f"VLA Train/Direction Token Accuracy"] = (
+                torch.stack(list(self.state["direction_accuracy"])).mean().item()
+            )
+        for idx in range(1, 5):
+            key = f"direction_{idx}_accuracy"
+            if len(self.state[key]) > 0:
+                latent_action_metrics[f"VLA Train/Direction Token {idx} Accuracy"] = (
+                    torch.stack(list(self.state[key])).mean().item()
+                )
 
         # Get metrics per dataset
         dataset_metrics = {}
@@ -335,6 +356,7 @@ class VLAMetrics:
                 f"{prefix}/Loss": loss,
                 f"{prefix}/L1 Loss": l1_loss,
                 f"{prefix}/Action Token Accuracy": action_accuracy,
+                **latent_action_metrics,
                 f"{prefix}/Loss (Raw)": loss_raw,
                 f"{prefix}/Learning Rate": lr,
                 f"{prefix}/Step Time": step_time,

@@ -240,3 +240,108 @@ VLA 50k: about 17-18 hours
 convert: minutes to tens of minutes
 Bridge finetune 30k: several hours to low tens of hours, depending on observed step time
 ```
+
+## Factorized LAM 30k VLA Handoff - 2026-05-07
+
+This is the known-good command shape for loading the factorized hyperbolic LAM
+30k checkpoint into VLA pretraining. Keep this as the canonical reproduction
+command for the local factorized Bridge run.
+
+Important distinction: W&B records the script argv, but not the full distributed
+wrapper and environment. Reproduce with the `tfcheck` Python and
+`python -m torch.distributed.run`, not by copying only the W&B command text.
+
+```bash
+cd /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/UniVLA-hyper
+
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+export WANDB_MODE=online
+export TOKENIZERS_PARALLELISM=false
+export OMP_NUM_THREADS=8
+export UNIVLA_PROFILE_STEPS=20
+export UNIVLA_DUMMY_LATENT_ACTIONS=0
+export UNIVLA_VLA_DATALOADER_WORKERS=0
+export UNIVLA_TRAJ_THREADS=4
+export UNIVLA_TRAJ_READ_THREADS=4
+export UNIVLA_FRAME_THREADS=8
+export UNIVLA_TF_RAM_BUDGET_MB=512
+export PYTHONPATH=/NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/UniVLA-hyper:${PYTHONPATH:-}
+
+/NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/.venvs/univla-tfcheck-py310/bin/python \
+  -m torch.distributed.run \
+  --standalone --nnodes 1 --nproc-per-node 8 \
+  vla-scripts/train.py \
+  --vla.type prism-dinosiglip-224px+mx-bridge \
+  --vla.max_steps 50000 \
+  --vla.shuffle_buffer_size 20000 \
+  --image_aug true \
+  --pretrain_vlm /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/data/univla_checkpoints/prismatic-vlms/prism-dinosiglip-224px+7b \
+  --lam_path /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/lam_bridge/logs/visual_vq_lam_bridge_hyperbolic_factorized_rad16_0to4_dir16_rad1_dir4tokens_prelift_hmax9_50k_workers2/epoch=0-step=30000.ckpt \
+  --lam_kind visual_vq_factorized \
+  --lam_config_path /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/UniVLA-hyper/latent_action_model/config.yaml \
+  --codebook_size 32 \
+  --latent_action_token_len 5 \
+  --data_root_dir /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/data/rlds_bridge_orig \
+  --run_root_dir /NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/outputs/univla_bridge_factorized_lam30k \
+  --wandb_project univla_bridge_lam_local \
+  --wandb_entity joonstack \
+  --run_id_note bridge_dataset_factorized_lam30k_rad16dir16_50k
+```
+
+Known-good live run:
+
+```text
+tmux session: vla_bridge_factorized_lam30k_50k_localproject
+log: outputs/bridge_pipeline_logs/manual_vla_factorized_20260507/vla_bridge_factorized_lam30k_50k_localproject_accsplit.log
+W&B: https://wandb.ai/joonstack/univla_bridge_lam_local/runs/n5yf89oh
+```
+
+Healthy profile from the local-project run:
+
+```text
+Threads per Dataset: [4]
+Reads per Dataset: [4]
+
+step 1: total=10.835s data_wait=1.267s dataset_fetch=0.661s collator_lam=0.598s
+step 2: total=1.744s  data_wait=0.251s dataset_fetch=0.061s collator_lam=0.182s
+step 3: total=1.289s  dataset_fetch=0.192s collator_lam=0.178s
+step 14: total=1.270s dataset_fetch=0.120s collator_lam=0.180s
+step 18: total=1.369s dataset_fetch=0.157s collator_lam=0.178s
+```
+
+Why the thread knobs were touched:
+
+- The original symptom was `data_wait` around 50-60 seconds, which means GPU
+  workers were starving on input rather than spending time in model compute.
+- In `UniVLA_fresh`, these are optional env overrides read by the dataset code,
+  not required exports in the fresh training scripts. If unset, Bridge uses
+  roughly `traj/read=1/1` because the mixture has one dataset, while frame
+  transforms default to `8`.
+- `UNIVLA_TRAJ_THREADS`, `UNIVLA_TRAJ_READ_THREADS`, and
+  `UNIVLA_FRAME_THREADS` are per rank / per dataset input-pipeline knobs. On an
+  8-rank run, blindly increasing them multiplies CPU pressure across ranks.
+- `1/1/1` can underfeed TF/RLDS; very high values can oversubscribe CPU and IO.
+  The stable known-good value is `4/4/8`.
+- Candidates like `6/4`, `6/6`, or `8/4` are only for short 200-step smoke
+  tests. Do not replace the full-run recipe unless `dataset_fetch`,
+  `data_wait`, and step time improve together.
+
+Lessons from the failed attempts:
+
+- `UNIVLA_DUMMY_LATENT_ACTIONS` must be off. The 2026-05-07 live run left it
+  unset, which is equivalent to `0` because the code only enables dummy latent
+  actions when the env var is exactly `1`. The reproduction command pins it to
+  `0` to remove ambiguity.
+- `UNIVLA_TF_RAM_BUDGET_MB=512` is essential for this VLA run. The code default
+  is `1` MB in the RLDS dataset path, and that produced `dataset_fetch` around
+  40 seconds in the slow run.
+- Use `/NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/.venvs/univla-tfcheck-py310/bin/python`.
+  The old repo `.venv` was not the known-good VLA environment.
+- Keep `UNIVLA_VLA_DATALOADER_WORKERS=0` for this path. The collator does LAM
+  work, and extra PyTorch workers are not the proven fix here.
+- The correct W&B project for this local VLA run is
+  `univla_bridge_lam_local`. A previous launch used
+  `univla_bridge_lam_factorized`; that was the wrong project for this run.
+- Current `dataset_fetch` is already about `0.06-0.19s` after warmup, and
+  `collator_lam` is about `0.18s`. Further dataloading tuning is not worth
+  interrupting a healthy full run.

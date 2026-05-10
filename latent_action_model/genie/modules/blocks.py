@@ -363,13 +363,118 @@ class VectorQuantizer(nn.Module):
     def __init__(self, num_latents: int, latent_dim: int, code_restart: bool = True) -> None:
         super(VectorQuantizer, self).__init__()
         self.codebook = nn.Embedding(num_latents, latent_dim)
-        self.codebook.weight.data.uniform_(-1.0 / num_latents, 1.0 / num_latents)
+        self.num_latents = num_latents
+        self.codebook_init_mode = os.environ.get("UNIVLA_VQ_INIT_MODE", "uniform").strip().lower()
+        self.codebook_init_range = float(os.environ.get("UNIVLA_VQ_INIT_RANGE", str(1.0 / num_latents)))
+        if self.codebook_init_range <= 0.0:
+            raise ValueError(f"UNIVLA_VQ_INIT_RANGE must be > 0, got {self.codebook_init_range}.")
+        self._init_codebook_weight()
 
         # Initialize a usage buffer
         self.register_buffer("usage", torch.zeros(num_latents), persistent=False)
-        self.num_latents = num_latents
+        self.register_buffer("_restart_count", torch.zeros((), dtype=torch.long), persistent=False)
 
         self.code_restart = code_restart
+
+    def _init_generator(self) -> torch.Generator:
+        seed = int(os.environ.get("UNIVLA_VQ_INIT_SEED", "1729"))
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(seed)
+        return generator
+
+    @staticmethod
+    def _parse_csv_floats(value: str, name: str) -> Tuple[float, ...]:
+        try:
+            parsed = tuple(float(part.strip()) for part in value.split(",") if part.strip())
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a comma-separated float list, got {value!r}.") from exc
+        if not parsed:
+            raise ValueError(f"{name} must not be empty.")
+        return parsed
+
+    @staticmethod
+    def _parse_csv_ints(value: str, name: str) -> Tuple[int, ...]:
+        try:
+            parsed = tuple(int(part.strip()) for part in value.split(",") if part.strip())
+        except ValueError as exc:
+            raise ValueError(f"{name} must be a comma-separated int list, got {value!r}.") from exc
+        if not parsed:
+            raise ValueError(f"{name} must not be empty.")
+        if any(count <= 0 for count in parsed):
+            raise ValueError(f"{name} entries must be positive, got {value!r}.")
+        return parsed
+
+    def _zero_shell_init_weight(self) -> Tensor:
+        radii = self._parse_csv_floats(
+            os.environ.get("UNIVLA_VQ_INIT_SHELL_RADII", "1.0,2.5,4.0"),
+            "UNIVLA_VQ_INIT_SHELL_RADII",
+        )
+        counts = self._parse_csv_ints(
+            os.environ.get("UNIVLA_VQ_INIT_SHELL_COUNTS", "5,5,5"),
+            "UNIVLA_VQ_INIT_SHELL_COUNTS",
+        )
+        if len(radii) != len(counts):
+            raise ValueError(
+                "UNIVLA_VQ_INIT_SHELL_RADII and UNIVLA_VQ_INIT_SHELL_COUNTS "
+                f"must have the same length, got {len(radii)} and {len(counts)}."
+            )
+        if sum(counts) != self.num_latents - 1:
+            raise ValueError(
+                "UNIVLA_VQ_INIT_SHELL_COUNTS must sum to num_latents - 1 "
+                f"({self.num_latents - 1}), got {sum(counts)}."
+            )
+
+        generator = self._init_generator()
+        weight = torch.zeros(self.num_latents, self.codebook.embedding_dim, dtype=torch.float32)
+        cursor = 1
+        for radius, count in zip(radii, counts):
+            if radius <= 0.0:
+                raise ValueError(f"UNIVLA_VQ_INIT_SHELL_RADII entries must be > 0, got {radius}.")
+            direction = torch.randn(
+                count,
+                self.codebook.embedding_dim,
+                generator=generator,
+                dtype=torch.float32,
+            )
+            direction = F.normalize(direction, dim=-1, eps=1e-6)
+            weight[cursor : cursor + count] = direction * radius
+            cursor += count
+        return weight
+
+    def _init_codebook_weight(self) -> None:
+        if self.codebook_init_mode == "uniform":
+            self.codebook.weight.data.uniform_(-self.codebook_init_range, self.codebook_init_range)
+            return
+        if self.codebook_init_mode == "zero_shells":
+            weight = self._zero_shell_init_weight().to(
+                device=self.codebook.weight.device,
+                dtype=self.codebook.weight.dtype,
+            )
+            self.codebook.weight.data.copy_(weight)
+            return
+        raise ValueError(
+            "UNIVLA_VQ_INIT_MODE must be one of {'uniform', 'zero_shells'}, "
+            f"got {self.codebook_init_mode!r}."
+        )
+
+    def _global_usage(self) -> Tensor:
+        usage = self.usage.clone()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(usage, op=torch.distributed.ReduceOp.SUM)
+        return usage
+
+    def _restart_generator(self) -> torch.Generator:
+        seed = int(os.environ.get("UNIVLA_VQ_RESTART_SEED", "1729")) + int(self._restart_count.item())
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(seed)
+        return generator
+
+    def _rank0_print(self, message: str) -> None:
+        rank = 0
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            rank = torch.distributed.get_rank()
+        if rank == 0:
+            print(message, flush=True)
 
     def update_usage(self, min_enc) -> None:
         counts = torch.bincount(
@@ -381,11 +486,43 @@ class VectorQuantizer(nn.Module):
     def random_restart(self) -> None:
         if self.code_restart:
             # Randomly restart all dead codes
-            dead_codes = torch.nonzero(self.usage < 1).squeeze(1)
-            rand_codes = torch.randperm(self.num_latents)[0:len(dead_codes)]
-            print(f"Restarting {len(dead_codes)} codes")
+            usage = self._global_usage()
+            dead_codes = torch.nonzero(usage < 1).squeeze(1)
+            dead_count = dead_codes.numel()
+            live_codes = torch.nonzero(usage >= 1).squeeze(1)
+            self._rank0_print(f"Restarting {dead_count} codes")
             with torch.no_grad():
-                self.codebook.weight[dead_codes] = self.codebook.weight[rand_codes]
+                if dead_count > 0:
+                    generator = self._restart_generator()
+                    if live_codes.numel() > 0:
+                        repeat_count = math.ceil(dead_count / live_codes.numel())
+                        source_codes = live_codes.repeat(repeat_count)[:dead_count]
+                        restarted = self.codebook.weight[source_codes].detach().clone()
+                        noise_std = float(os.environ.get("UNIVLA_VQ_RESTART_NOISE", "0.01"))
+                        if noise_std > 0.0:
+                            noise = torch.randn(
+                                restarted.shape,
+                                generator=generator,
+                                dtype=torch.float32,
+                            ).to(device=restarted.device, dtype=restarted.dtype)
+                            restarted = restarted + noise_std * noise
+                    else:
+                        restarted = torch.empty(
+                            dead_count,
+                            self.codebook.embedding_dim,
+                            dtype=torch.float32,
+                        )
+                        restarted.uniform_(
+                            -self.codebook_init_range,
+                            self.codebook_init_range,
+                            generator=generator,
+                        )
+                        restarted = restarted.to(
+                            device=self.codebook.weight.device,
+                            dtype=self.codebook.weight.dtype,
+                        )
+                    self.codebook.weight[dead_codes] = restarted
+                    self._restart_count.add_(1)
 
             if hasattr(self, "inner_vq"):
                 self.inner_vq.random_restart()
@@ -398,7 +535,7 @@ class VectorQuantizer(nn.Module):
             if hasattr(self, "inner_vq"):
                 self.inner_vq.reset_usage()
 
-    def forward(self, x: Tensor) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+    def forward(self, x: Tensor, update_usage: bool = True) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
         # Compute distances
         distance = torch.cdist(x, self.codebook.weight)
 
@@ -408,12 +545,234 @@ class VectorQuantizer(nn.Module):
         z = self.codebook(indices)
         
         # Update code usage
-        if (not self.training or self.code_restart) and os.environ.get("UNIVLA_LAM_DISABLE_USAGE_UPDATE", "0") != "1":
+        if (
+            update_usage
+            and (not self.training or self.code_restart)
+            and os.environ.get("UNIVLA_LAM_DISABLE_USAGE_UPDATE", "0") != "1"
+        ):
             self.update_usage(indices)
 
         # Straight through estimator
         z_q = x + (z - x).detach()
         return z_q, z, x, indices
+
+
+class FactorizedVectorQuantizer(nn.Module):
+    def __init__(
+        self,
+        num_radius_codes: int,
+        num_direction_codes: int,
+        latent_dim: int,
+        radius_values: str | None = None,
+        code_restart: bool = True,
+    ) -> None:
+        super().__init__()
+        if num_radius_codes < 2:
+            raise ValueError(f"num_radius_codes must be >= 2, got {num_radius_codes}.")
+        if num_direction_codes < 1:
+            raise ValueError(f"num_direction_codes must be >= 1, got {num_direction_codes}.")
+
+        self.num_radius_codes = int(num_radius_codes)
+        self.num_direction_codes = int(num_direction_codes)
+        # Token vocabulary size: one radius token plus one direction token per slot.
+        # The geometric codebook still has R * D possible vectors via rho[r] * dir[d].
+        self.num_latents = self.num_radius_codes + self.num_direction_codes
+        self.latent_dim = int(latent_dim)
+        self.code_restart = code_restart
+        self.radius_delta_floor = float(os.environ.get("UNIVLA_FACTOR_VQ_RADIUS_DELTA_FLOOR", "1e-5"))
+        if self.radius_delta_floor <= 0.0:
+            raise ValueError(
+                "UNIVLA_FACTOR_VQ_RADIUS_DELTA_FLOOR must be > 0, "
+                f"got {self.radius_delta_floor}."
+            )
+
+        radii = self._init_radius_values(radius_values)
+        self.radius_has_zero = bool(radii[0].item() <= self.radius_delta_floor)
+        if self.radius_has_zero:
+            deltas = radii[1:] - radii[:-1]
+        else:
+            deltas = torch.cat([radii[:1], radii[1:] - radii[:-1]], dim=0)
+        if torch.any(deltas <= 0):
+            raise ValueError(f"factorized VQ radius values must be strictly increasing, got {radii.tolist()}.")
+        deltas = torch.clamp(deltas - self.radius_delta_floor, min=self.radius_delta_floor)
+        self.radius_delta_unconstrained = nn.Parameter(self._inverse_softplus(deltas))
+
+        self.direction_codebook = nn.Embedding(self.num_direction_codes, self.latent_dim)
+        self._init_direction_weight()
+
+        self.register_buffer("usage", torch.zeros(self.num_latents), persistent=False)
+        self.register_buffer("radius_usage", torch.zeros(self.num_radius_codes), persistent=False)
+        self.register_buffer("direction_usage", torch.zeros(self.num_direction_codes), persistent=False)
+        self.register_buffer("_restart_count", torch.zeros((), dtype=torch.long), persistent=False)
+
+    @staticmethod
+    def _inverse_softplus(value: Tensor) -> Tensor:
+        return torch.log(torch.expm1(value))
+
+    def _init_radius_values(self, radius_values: str | None) -> Tensor:
+        value = radius_values or os.environ.get("UNIVLA_FACTOR_VQ_RADIUS_VALUES", "")
+        if value:
+            radii = torch.tensor(VectorQuantizer._parse_csv_floats(value, "factorized_vq_radius_values"))
+        else:
+            radii = torch.linspace(0.0, 1.0, self.num_radius_codes)
+        if radii.numel() != self.num_radius_codes:
+            raise ValueError(
+                "factorized_vq_radius_values must contain exactly "
+                f"{self.num_radius_codes} values, got {radii.numel()}."
+            )
+        if torch.any(radii < 0):
+            raise ValueError(f"factorized VQ radius values must be >= 0, got {radii.tolist()}.")
+        if torch.any(radii[1:] <= radii[:-1]):
+            raise ValueError(f"factorized VQ radius values must be strictly increasing, got {radii.tolist()}.")
+        return radii.float()
+
+    def _init_generator(self) -> torch.Generator:
+        seed = int(os.environ.get("UNIVLA_FACTOR_VQ_INIT_SEED", "1729"))
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(seed)
+        return generator
+
+    def _init_direction_weight(self) -> None:
+        generator = self._init_generator()
+        init_range = float(os.environ.get("UNIVLA_FACTOR_VQ_DIRECTION_INIT_RANGE", str(1.0 / self.num_latents)))
+        if init_range <= 0.0:
+            raise ValueError(
+                "UNIVLA_FACTOR_VQ_DIRECTION_INIT_RANGE must be > 0, "
+                f"got {init_range}."
+            )
+        weight = torch.empty(
+            self.num_direction_codes,
+            self.latent_dim,
+            dtype=torch.float32,
+        )
+        weight.uniform_(-init_range, init_range, generator=generator)
+        weight = F.normalize(weight, dim=-1, eps=1e-6)
+        self.direction_codebook.weight.data.copy_(weight.to(self.direction_codebook.weight))
+
+    def radius_values(self) -> Tensor:
+        deltas = F.softplus(self.radius_delta_unconstrained) + self.radius_delta_floor
+        radii = torch.cumsum(deltas, dim=0)
+        if self.radius_has_zero:
+            radii = torch.cat([radii.new_zeros(1), radii], dim=0)
+        return radii
+
+    def direction_values(self) -> Tensor:
+        return F.normalize(self.direction_codebook.weight, dim=-1, eps=1e-6)
+
+    def codebook_weight(self) -> Tensor:
+        radii = self.radius_values()
+        directions = self.direction_values()
+        return (radii[:, None, None] * directions[None, :, :]).reshape(
+            self.num_radius_codes * self.num_direction_codes,
+            self.latent_dim,
+        )
+
+    def update_usage(self, radius_indices: Tensor, direction_indices: Tensor, token_indices: Tensor) -> None:
+        self.usage.add_(torch.bincount(token_indices.detach().reshape(-1), minlength=self.num_latents).to(self.usage))
+        self.radius_usage.add_(
+            torch.bincount(radius_indices.detach().reshape(-1), minlength=self.num_radius_codes).to(self.radius_usage)
+        )
+        self.direction_usage.add_(
+            torch.bincount(
+                direction_indices.detach().reshape(-1),
+                minlength=self.num_direction_codes,
+            ).to(self.direction_usage)
+        )
+
+    def _global_usages(self) -> Tuple[Tensor, Tensor, Tensor]:
+        usage = self.usage.clone()
+        radius_usage = self.radius_usage.clone()
+        direction_usage = self.direction_usage.clone()
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.all_reduce(usage, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(radius_usage, op=torch.distributed.ReduceOp.SUM)
+            torch.distributed.all_reduce(direction_usage, op=torch.distributed.ReduceOp.SUM)
+        return usage, radius_usage, direction_usage
+
+    def _restart_generator(self) -> torch.Generator:
+        seed = int(os.environ.get("UNIVLA_FACTOR_VQ_RESTART_SEED", "1729")) + int(self._restart_count.item())
+        generator = torch.Generator(device="cpu")
+        generator.manual_seed(seed)
+        return generator
+
+    def random_restart(self) -> None:
+        if not self.code_restart:
+            return
+        usage, radius_usage, direction_usage = self._global_usages()
+        dead_tokens = torch.nonzero(usage < 1).squeeze(1)
+        dead_radii = torch.nonzero(radius_usage < 1).squeeze(1)
+        dead_directions = torch.nonzero(direction_usage < 1).squeeze(1)
+        live_directions = torch.nonzero(direction_usage >= 1).squeeze(1)
+
+        rank = torch.distributed.get_rank() if torch.distributed.is_available() and torch.distributed.is_initialized() else 0
+        if rank == 0:
+            print(
+                "FactorizedVQ usage: "
+                f"dead_tokens={dead_tokens.numel()} "
+                f"dead_radius={dead_radii.numel()} "
+                f"dead_direction={dead_directions.numel()}",
+                flush=True,
+            )
+        if dead_directions.numel() == 0:
+            return
+
+        with torch.no_grad():
+            generator = self._restart_generator()
+            if live_directions.numel() > 0:
+                repeat_count = math.ceil(dead_directions.numel() / live_directions.numel())
+                source_directions = live_directions.repeat(repeat_count)[: dead_directions.numel()]
+                restarted = self.direction_codebook.weight[source_directions].detach().clone()
+                noise_std = float(os.environ.get("UNIVLA_FACTOR_VQ_RESTART_NOISE", "0.01"))
+                if noise_std > 0.0:
+                    noise = torch.randn(
+                        restarted.shape,
+                        generator=generator,
+                        dtype=torch.float32,
+                    ).to(device=restarted.device, dtype=restarted.dtype)
+                    restarted = restarted + noise_std * noise
+            else:
+                init_range = float(os.environ.get("UNIVLA_FACTOR_VQ_DIRECTION_INIT_RANGE", str(1.0 / self.num_latents)))
+                restarted = torch.empty(
+                    dead_directions.numel(),
+                    self.latent_dim,
+                    dtype=torch.float32,
+                )
+                restarted.uniform_(-init_range, init_range, generator=generator)
+                restarted = restarted.to(
+                    device=self.direction_codebook.weight.device,
+                    dtype=self.direction_codebook.weight.dtype,
+                )
+            restarted = F.normalize(restarted, dim=-1, eps=1e-6)
+            self.direction_codebook.weight[dead_directions] = restarted
+            self._restart_count.add_(1)
+
+    def reset_usage(self) -> None:
+        if self.code_restart:
+            self.usage.zero_()
+            self.radius_usage.zero_()
+            self.direction_usage.zero_()
+
+    def forward(self, x: Tensor, update_usage: bool = True) -> Tuple[Tensor, Tensor, Tensor, Tensor, Tensor, Tensor]:
+        radii = self.radius_values()
+        directions = self.direction_values()
+
+        radius = torch.linalg.vector_norm(x, dim=-1).mean(dim=-1)
+        unit = F.normalize(x, dim=-1, eps=1e-6)
+        radius_indices = torch.argmin((radius[..., None] - radii) ** 2, dim=-1)
+        direction_indices = torch.argmax(unit @ directions.T, dim=-1)
+        direction_token_indices = direction_indices + self.num_radius_codes
+        token_indices = torch.cat([radius_indices[..., None], direction_token_indices], dim=-1)
+
+        z = radii[radius_indices][..., None, None] * directions[direction_indices]
+        if (
+            update_usage
+            and (not self.training or self.code_restart)
+            and os.environ.get("UNIVLA_LAM_DISABLE_USAGE_UPDATE", "0") != "1"
+        ):
+            self.update_usage(radius_indices, direction_indices, token_indices)
+
+        z_q = x + (z - x).detach()
+        return z_q, z, x, token_indices, radius_indices, direction_indices
 
 
 class ResidualVectorQuantizer(VectorQuantizer):

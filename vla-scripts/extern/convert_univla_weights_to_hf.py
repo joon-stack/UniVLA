@@ -25,15 +25,20 @@ class HFConvertConfig:
     openvla_model_path_or_id: Union[str, Path] = (                      # Path to Pretrained VLA (on disk or HF Hub)
         "/path/to/your/pretrained_ckpts_path"
     )
-    ckpt_name = 'step-020000-epoch-12-loss=0.1572.pt'                   # The specific checkpoint to be converted (modify accordingly)
+    ckpt_name: str = 'step-020000-epoch-12-loss=0.1572.pt'              # The specific checkpoint to be converted (modify accordingly)
     output_hf_model_local_path: Path = Path(                            # Path to Local Path to save HF model
         "/path/to/your/output_model_path"
     )
 
     # HF Hub Credentials (required for Gated Models like LLaMa-2)
     hf_token: Union[str, Path] = ''                                     # Environment variable or Path to HF Token
+    tokenizer_path: str = (                                             # Local tokenizer path or HF repo id
+        "/NHNHOME/WORKSPACE/0526040036_A/BASE/user/01/youngjoonjeong/data/hf_cache/hub/"
+        "models--NousResearch--Llama-2-7b-hf/snapshots/8efe6c9b93655b934e27bd9981e3ec13e55aee9d"
+    )
 
-    codebook_size: int = 16                                             # Latent action codebook size                                             
+    codebook_size: int = 16                                             # Latent action codebook size
+    latent_action_token_len: int = 4                                    # Number of latent action tokens generated at inference
     def __post_init__(self) -> None:
         self.hf_token = self.hf_token.read_text().strip() if isinstance(self.hf_token, Path) else self.hf_token
 
@@ -141,13 +146,17 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
         llm_max_length=prismatic_config["llm_max_length"],
         torch_dtype=torch.bfloat16,
         norm_stats=norm_stats,
+        latent_action_token_len=cfg.latent_action_token_len,
     )
 
     # Instantiate & Add Pad to Tokenizer =>> following `prismatic.models.materialize.get_llm_backbone_and_tokenizer`
     #   TODO (siddk) :: Implement batched generation -- in which case this should set `padding_side = "left"`!
     print("[*] Instantiating and Patching Tokenizer, LLM Config")
     tokenizer = AutoTokenizer.from_pretrained(
-        '/cpfs01/shared/opendrivelab/qwbu/llama2-7b-hf', model_max_length=hf_config.llm_max_length, token=cfg.hf_token, padding_side="right"
+        cfg.tokenizer_path,
+        model_max_length=hf_config.llm_max_length,
+        token=cfg.hf_token,
+        padding_side="right",
     )
     tokenizer.add_special_tokens({"pad_token": "<PAD>"})
 
@@ -170,18 +179,12 @@ def convert_openvla_weights_to_hf(cfg: HFConvertConfig) -> None:
     print("[*] Loading TIMM Vision Backbone(s) and Image Transform(s) =>> Initializing PrismaticImageProcessor")
     input_sizes, interpolations, means, stds = [], [], [], []
     for idx, timm_model_id in enumerate(hf_config.timm_model_ids):
-        if 'dino' in timm_model_id:
-            pretrained_cfg={'file': '/vit_large_patch14_reg4_dinov2.lvd142m/pytorch_model.bin'}
-        else:
-            pretrained_cfg={'file': '/vit_so400m_patch14_siglip_224/open_clip_pytorch_model.bin'}
-
         timm_vision_backbone = timm.create_model(
             timm_model_id,
-            pretrained=True,
+            pretrained=False,
             num_classes=0,
             img_size=hf_config.image_sizes[idx],
             act_layer=hf_config.timm_override_act_layers[idx],
-            pretrained_cfg=pretrained_cfg
         )
 
         # Get Per-Backbone Image Processing

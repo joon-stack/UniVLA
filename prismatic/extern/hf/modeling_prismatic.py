@@ -547,8 +547,17 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
                 (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
             )
 
+        latent_action_token_len = int(getattr(self.config, "latent_action_token_len", 4))
+
         # Run VLA inference
-        output = self.generate(input_ids, min_new_tokens=4, max_new_tokens=4, return_dict_in_generate=True, output_hidden_states=True, **kwargs)
+        output = self.generate(
+            input_ids,
+            min_new_tokens=latent_action_token_len,
+            max_new_tokens=latent_action_token_len,
+            return_dict_in_generate=True,
+            output_hidden_states=True,
+            **kwargs,
+        )
         generated_ids = output.sequences
 
         
@@ -562,9 +571,9 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
         latent_mask = latent_mask[:, 1:]
         # print(latent_mask[0])
         # latent_action = latent_tokens[:, latent_mask[0], :]
-        latent_action = latent_tokens[:, -4:]
+        latent_action = latent_tokens[:, -latent_action_token_len:]
         generated_ids = generated_ids[:, 1:][:, latent_mask[0]]
-        generated_ids = generated_ids[:, -4:]
+        generated_ids = generated_ids[:, -latent_action_token_len:]
 
         return latent_action, visual_embed, generated_ids
 

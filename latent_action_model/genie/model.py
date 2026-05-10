@@ -104,6 +104,144 @@ class DINO_LAM(LightningModule):
         )
         return (counts != 0).float().mean()
 
+    def _entropy_from_counts(self, counts: Tensor) -> Tensor:
+        counts = counts.detach().float()
+        total = counts.sum()
+        if total <= 0:
+            return counts.new_zeros(())
+        probs = counts / total
+        probs = probs[probs > 0]
+        return -(probs * probs.log()).sum()
+
+    def _token_entropy(self, indices: Tensor, num_latents: int) -> Tensor:
+        counts = torch.bincount(indices.detach().reshape(-1).long(), minlength=num_latents)
+        return self._entropy_from_counts(counts)
+
+    def _token_perplexity(self, indices: Tensor, num_latents: int) -> Tensor:
+        return self._token_entropy(indices, num_latents).exp()
+
+    def _rank_bins(self, values: Tensor, num_bins: int) -> Tuple[Tensor, int]:
+        values = values.detach().float().reshape(-1)
+        if values.numel() == 0:
+            return values.new_zeros((0,), dtype=torch.long), 1
+        if values.numel() <= 1 or values.var(unbiased=False) <= 1e-12:
+            return torch.zeros_like(values, dtype=torch.long), 1
+        bins = max(1, min(int(num_bins), int(values.numel())))
+        order = torch.argsort(values)
+        ranks = torch.empty_like(order)
+        ranks[order] = torch.arange(values.numel(), device=values.device, dtype=order.dtype)
+        return torch.div(ranks * bins, values.numel(), rounding_mode="floor").long().clamp_max(bins - 1), bins
+
+    def _discrete_mi_nmi(self, x: Tensor, num_x: int, y: Tensor, num_y: int) -> Tuple[Tensor, Tensor]:
+        x = x.detach().reshape(-1).long()
+        y = y.detach().reshape(-1).long()
+        if x.numel() == 0 or x.numel() != y.numel() or num_x <= 1 or num_y <= 1:
+            zero = x.new_zeros((), dtype=torch.float32)
+            return zero, zero
+
+        x = x.clamp(0, num_x - 1)
+        y = y.clamp(0, num_y - 1)
+        joint_counts = torch.bincount(x * num_y + y, minlength=num_x * num_y).reshape(num_x, num_y).float()
+        total = joint_counts.sum()
+        if total <= 0:
+            zero = joint_counts.new_zeros(())
+            return zero, zero
+
+        p_xy = joint_counts / total
+        p_x = p_xy.sum(dim=1)
+        p_y = p_xy.sum(dim=0)
+        h_x = self._entropy_from_counts(p_x)
+        h_y = self._entropy_from_counts(p_y)
+        nonzero = p_xy > 0
+        expected = (p_x[:, None] * p_y[None, :]).clamp_min(1e-12)
+        mi = (p_xy[nonzero] * (p_xy[nonzero].log() - expected[nonzero].log())).sum()
+        denom = torch.sqrt((h_x * h_y).clamp_min(1e-12))
+        nmi = torch.where((h_x > 0) & (h_y > 0), mi / denom, mi.new_zeros(()))
+        return mi, nmi
+
+    def _action_bins(self, action: Tensor) -> Tuple[Tensor, int, Tensor, int, Tensor, int]:
+        action_flat = action.detach().float().reshape(action.shape[0], -1)
+        norm = torch.linalg.vector_norm(action_flat, dim=-1)
+        norm_bins, num_norm_bins = self._rank_bins(norm, int(os.environ.get("UNIVLA_MI_NUM_BINS", "16")))
+
+        dominant_dim = action_flat.abs().argmax(dim=-1)
+        dominant_value = action_flat.gather(1, dominant_dim[:, None]).squeeze(1)
+        direction_bins = dominant_dim * 2 + (dominant_value >= 0).long()
+        num_direction_bins = max(1, action_flat.shape[-1] * 2)
+        action_bins = norm_bins * num_direction_bins + direction_bins
+        num_action_bins = num_norm_bins * num_direction_bins
+        return norm_bins, num_norm_bins, direction_bins, num_direction_bins, action_bins, num_action_bins
+
+    def _sample_vector_norm(self, tensor: Tensor) -> Tensor:
+        norms = torch.linalg.vector_norm(tensor.detach().float(), dim=-1)
+        if norms.ndim == 1:
+            return norms
+        return norms.reshape(norms.shape[0], -1).mean(dim=1)
+
+    def _future_standard_indices(self, outputs: Dict, batch_size: int, key: str = "indices") -> Tensor | None:
+        if key not in outputs or batch_size <= 0:
+            return None
+        indices = outputs[key].detach()
+        if indices.shape[0] < batch_size:
+            return None
+        return indices.reshape(indices.shape[0], -1).long()[-batch_size:]
+
+    def _standard_token_quality_metrics(
+        self,
+        outputs: Dict,
+        batch: Dict,
+        *,
+        key: str = "indices",
+        prefix: str = "code",
+        num_latents: int | None = None,
+    ) -> Tuple:
+        if key not in outputs:
+            return ()
+        num_latents = int(num_latents or self.lam_num_latents)
+        indices = outputs[key].detach().reshape(-1).long()
+        logs = (
+            (f"entropy/{prefix}", self._token_entropy(indices, num_latents)),
+            (f"perplexity/{prefix}", self._token_perplexity(indices, num_latents)),
+        )
+
+        batch_size = batch["videos"].shape[0] if "videos" in batch else 0
+        future_indices = self._future_standard_indices(outputs, batch_size, key=key)
+        if future_indices is None:
+            return logs
+
+        if "action" in batch:
+            norm_bins, num_norm_bins, direction_bins, num_direction_bins, action_bins, num_action_bins = self._action_bins(
+                batch["action"].to(device=future_indices.device)
+            )
+            token_flat = future_indices.reshape(-1)
+
+            norm_target = norm_bins[:, None].expand_as(future_indices).reshape(-1)
+            mi, nmi = self._discrete_mi_nmi(token_flat, num_latents, norm_target, num_norm_bins)
+            logs = logs + ((f"mi/{prefix}_action_norm", mi), (f"nmi/{prefix}_action_norm", nmi))
+
+            direction_target = direction_bins[:, None].expand_as(future_indices).reshape(-1)
+            mi, nmi = self._discrete_mi_nmi(token_flat, num_latents, direction_target, num_direction_bins)
+            logs = logs + ((f"mi/{prefix}_action_direction", mi), (f"nmi/{prefix}_action_direction", nmi))
+
+            action_target = action_bins[:, None].expand_as(future_indices).reshape(-1)
+            mi, nmi = self._discrete_mi_nmi(token_flat, num_latents, action_target, num_action_bins)
+            logs = logs + ((f"mi/{prefix}_action_bin", mi), (f"nmi/{prefix}_action_bin", nmi))
+
+        if "patches" in outputs and outputs["patches"].shape[0] == batch_size and outputs["patches"].shape[1] >= 2:
+            state_change = self._sample_vector_norm(outputs["patches"][:, -1] - outputs["patches"][:, 0])
+            state_bins, num_state_bins = self._rank_bins(
+                state_change.to(device=future_indices.device),
+                int(os.environ.get("UNIVLA_MI_NUM_BINS", "16")),
+            )
+            token_flat = future_indices.reshape(-1)
+            state_target = state_bins[:, None].expand_as(future_indices).reshape(-1)
+            mi, nmi = self._discrete_mi_nmi(token_flat, num_latents, state_target, num_state_bins)
+            logs = logs + (
+                (f"mi/{prefix}_dino_state_change_norm", mi),
+                (f"nmi/{prefix}_dino_state_change_norm", nmi),
+            )
+        return logs
+
     def shared_step(self, batch: Dict) -> Tuple:
         # batch: keys['videos', 'task_instruction', 'action', 'dataset_names']
 
@@ -131,6 +269,7 @@ class DINO_LAM(LightningModule):
             ("commit_loss", commit_loss),
             ("code_usage", code_usage),
         )
+        loss_logs = loss_logs + self._standard_token_quality_metrics(outputs, batch)
 
         if "indices_uncontrol" in outputs.keys():
             uncontrol_code_usage = self._code_usage(outputs["indices_uncontrol"], self.lam.vq.num_latents)
@@ -143,6 +282,17 @@ class DINO_LAM(LightningModule):
                 ("commit_loss_uncontrol", commit_loss_uncontrol),
                 ("code_usage", code_usage),
                 ("code_usage_uncontrol", uncontrol_code_usage),
+            )
+            loss_logs = (
+                loss_logs
+                + self._standard_token_quality_metrics(outputs, batch)
+                + self._standard_token_quality_metrics(
+                    outputs,
+                    batch,
+                    key="indices_uncontrol",
+                    prefix="uncontrol_code",
+                    num_latents=self.lam.vq.num_latents,
+                )
             )
 
         return outputs, loss, loss_logs
