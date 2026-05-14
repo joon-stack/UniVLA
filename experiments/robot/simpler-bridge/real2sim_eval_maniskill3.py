@@ -59,6 +59,21 @@ class Args:
     ckpt_path: str = ""
     """Checkpoint path for models. Only used for RT models"""
 
+    policy_path: str = ""
+    """LeRobot pretrained_model directory or HF repo id. If empty, ckpt_path is used."""
+
+    policy_device: str = "cuda"
+    """Torch device for LeRobot policy inference."""
+
+    policy_debug_actions: int = 0
+    """Print the first N LeRobot raw/postprocessed actions for debugging."""
+
+    policy_action_execution: str = "queue"
+    """LeRobot action execution mode: queue or temporal_agg."""
+
+    policy_temporal_agg_coeff: float = -0.1
+    """Exponential coefficient for LeRobot temporal action aggregation."""
+
     action_decoder_path: str = ""
 
     pred_action_horizon: int = 10
@@ -112,10 +127,27 @@ def main():
                 action_scale=1,
                 pred_action_horizon=args.pred_action_horizon,
             )
+        elif args.model in {"lerobot", "pi05", "pi0_fast", "smolvla", "diffusion"}:
+            if args.num_envs != 1:
+                raise ValueError("LeRobotBridgeInference currently supports --num-envs 1 only.")
+            try:
+                from policies.lerobot_bridge.lerobot_bridge_model import LeRobotBridgeInference
+            except ModuleNotFoundError:
+                from simpler_env.policies.lerobot_bridge.lerobot_bridge_model import LeRobotBridgeInference
 
-    except:
+            model = LeRobotBridgeInference(
+                policy_path=args.policy_path or args.ckpt_path,
+                policy_setup=policy_setup,
+                action_scale=1,
+                device=args.policy_device,
+                debug_actions=args.policy_debug_actions,
+                action_execution=args.policy_action_execution,
+                temporal_agg_coeff=args.policy_temporal_agg_coeff,
+            )
+
+    except Exception as exc:
         if args.model is not None:
-            raise Exception("SIMPLER Env Policy Inference is not installed")
+            raise RuntimeError(f"Failed to initialize SimplerEnv policy inference for model {args.model!r}") from exc
 
     model_name = args.model if args.model is not None else "random"
     if model_name == "random":
