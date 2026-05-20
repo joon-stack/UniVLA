@@ -61,7 +61,10 @@ def tensor_summary(tensor: torch.Tensor) -> str:
 
 
 def as_list(values: Any, precision: int = 6) -> list[float]:
-    array = np.asarray(values, dtype=np.float32).reshape(-1)
+    if isinstance(values, torch.Tensor):
+        array = values.detach().float().cpu().numpy().reshape(-1)
+    else:
+        array = np.asarray(values, dtype=np.float32).reshape(-1)
     return [round(float(x), precision) for x in array.tolist()]
 
 
