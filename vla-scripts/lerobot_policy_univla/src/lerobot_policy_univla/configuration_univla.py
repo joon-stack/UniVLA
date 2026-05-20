@@ -73,6 +73,7 @@ class UniVLAConfig(PreTrainedConfig):
     low_cpu_mem_usage: bool = True
     load_in_8bit: bool = False
     load_in_4bit: bool = False
+    use_peft: bool = False
     use_proprio: bool = True
     wrist_fusion: str = "none"
     decoder_output_tanh: bool = True
