@@ -25,6 +25,7 @@ import torch.nn as nn
 import transformers
 from timm.models.vision_transformer import LayerScale
 from transformers import AutoModelForCausalLM, PretrainedConfig, PreTrainedModel
+from transformers.generation.logits_process import LogitsProcessorList
 from transformers.modeling_outputs import ModelOutput
 
 from .configuration_prismatic import OpenVLAConfig, PrismaticConfig
@@ -35,6 +36,55 @@ logger = logging.getLogger(__name__)
 
 # === PyTorch/HuggingFace Default IGNORE_INDEX (for CrossEntropyLoss labels)
 IGNORE_INDEX = -100
+
+
+class LatentActionTokenMaskLogitsProcessor:
+    """Restrict generated latent action tokens to structurally valid code ranges."""
+
+    def __init__(
+        self,
+        *,
+        prompt_len: int,
+        latent_action_token_len: int,
+        action_token_id_offset: int,
+        mode: str,
+        action_vocab_size: int,
+        radius_action_vocab_size: int,
+        direction_action_vocab_size: int,
+    ) -> None:
+        self.prompt_len = int(prompt_len)
+        self.latent_action_token_len = int(latent_action_token_len)
+        self.action_token_id_offset = int(action_token_id_offset)
+        self.mode = str(mode or "none").strip().lower()
+        self.action_vocab_size = int(action_vocab_size)
+        self.radius_action_vocab_size = int(radius_action_vocab_size)
+        self.direction_action_vocab_size = int(direction_action_vocab_size)
+
+    def _allowed_action_indices(self, step: int) -> range:
+        if self.mode == "factorized_rad_dir":
+            if step % self.latent_action_token_len == 0:
+                return range(0, self.radius_action_vocab_size)
+            start = self.radius_action_vocab_size
+            return range(start, start + self.direction_action_vocab_size)
+        if self.mode in {"flat", "all"}:
+            return range(0, self.action_vocab_size)
+        raise ValueError(f"Unsupported action token mask mode: {self.mode!r}")
+
+    def __call__(self, input_ids: torch.LongTensor, scores: torch.FloatTensor) -> torch.FloatTensor:
+        generated_so_far = max(0, int(input_ids.shape[1]) - self.prompt_len)
+        allowed_token_ids = [
+            self.action_token_id_offset + action_idx
+            for action_idx in self._allowed_action_indices(generated_so_far)
+            if 0 <= self.action_token_id_offset + action_idx < scores.shape[-1]
+        ]
+        if not allowed_token_ids:
+            raise ValueError(
+                "No valid latent action token IDs for "
+                f"mode={self.mode!r}, step={generated_so_far}, vocab={scores.shape[-1]}."
+            )
+        masked_scores = scores.new_full(scores.shape, torch.finfo(scores.dtype).min)
+        masked_scores[:, allowed_token_ids] = scores[:, allowed_token_ids]
+        return masked_scores
 
 
 # === Utility Functions for Monkey-Patching ===
@@ -513,6 +563,14 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             input_ids = torch.cat(
                 (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
             )
+            attention_mask = kwargs.get("attention_mask")
+            if attention_mask is not None:
+                suffix_mask = torch.ones(
+                    (attention_mask.shape[0], 1),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                kwargs["attention_mask"] = torch.cat((attention_mask, suffix_mask), dim=1)
 
         # Run VLA inference
         generated_ids = self.generate(input_ids, max_new_tokens=self.get_action_dim(unnorm_key), **kwargs)
@@ -546,8 +604,39 @@ class OpenVLAForActionPrediction(PrismaticForConditionalGeneration):
             input_ids = torch.cat(
                 (input_ids, torch.unsqueeze(torch.Tensor([29871]).long(), dim=0).to(input_ids.device)), dim=1
             )
+            attention_mask = kwargs.get("attention_mask")
+            if attention_mask is not None:
+                suffix_mask = torch.ones(
+                    (attention_mask.shape[0], 1),
+                    dtype=attention_mask.dtype,
+                    device=attention_mask.device,
+                )
+                kwargs["attention_mask"] = torch.cat((attention_mask, suffix_mask), dim=1)
 
         latent_action_token_len = int(getattr(self.config, "latent_action_token_len", 4))
+        action_token_mask = str(getattr(self.config, "action_token_mask", "none") or "none").strip().lower()
+        if action_token_mask != "none":
+            mask_processor = LatentActionTokenMaskLogitsProcessor(
+                prompt_len=input_ids.shape[1],
+                latent_action_token_len=latent_action_token_len,
+                action_token_id_offset=int(getattr(self.config, "action_token_id_offset", 32001)),
+                mode=action_token_mask,
+                action_vocab_size=int(getattr(self.config, "action_vocab_size", 32)),
+                radius_action_vocab_size=int(getattr(self.config, "radius_action_vocab_size", 16)),
+                direction_action_vocab_size=int(getattr(self.config, "direction_action_vocab_size", 16)),
+            )
+            existing_processors = kwargs.pop("logits_processor", None)
+            if existing_processors is None:
+                kwargs["logits_processor"] = LogitsProcessorList([mask_processor])
+            else:
+                if isinstance(existing_processors, LogitsProcessorList):
+                    processors = existing_processors
+                elif isinstance(existing_processors, (list, tuple)):
+                    processors = LogitsProcessorList(existing_processors)
+                else:
+                    processors = LogitsProcessorList([existing_processors])
+                processors.append(mask_processor)
+                kwargs["logits_processor"] = processors
 
         # Run VLA inference
         output = self.generate(

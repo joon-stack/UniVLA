@@ -14,7 +14,11 @@ import torch
 from PIL import Image
 from torch import Tensor, nn
 
-from lerobot.configs import FeatureType, PreTrainedConfig
+try:
+    from lerobot.configs import FeatureType, PreTrainedConfig
+except ImportError:
+    from lerobot.configs.policies import PreTrainedConfig
+    from lerobot.configs.types import FeatureType
 from lerobot.policies.pretrained import PreTrainedPolicy
 from lerobot.utils.constants import ACTION
 
@@ -34,6 +38,18 @@ def _torch_dtype(name: str) -> torch.dtype:
     if key not in table:
         raise ValueError(f"Unsupported torch_dtype={name!r}. Use one of {sorted(table)}.")
     return table[key]
+
+
+def _env_bool(name: str) -> bool | None:
+    value = os.environ.get(name)
+    if value is None:
+        return None
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise ValueError(f"{name} must be a boolean-like value, got {value!r}.")
 
 
 def _strip_prefix_if_present(state_dict: dict[str, Tensor], prefix: str) -> dict[str, Tensor]:
@@ -150,6 +166,7 @@ def _make_action_decoder_cls(map_block_cls: type[nn.Module] = _MAPBlock):
             latent_action_token_len: int,
             proprio_dim: int,
             use_proprio: bool,
+            use_wrist: bool,
             output_tanh: bool,
         ) -> None:
             super().__init__()
@@ -158,6 +175,7 @@ def _make_action_decoder_cls(map_block_cls: type[nn.Module] = _MAPBlock):
             self.latent_action_token_len = int(latent_action_token_len)
             self.proprio_dim = int(proprio_dim)
             self.use_proprio = bool(use_proprio)
+            self.use_wrist = bool(use_wrist)
             self.latent_action_pool = map_block_cls(
                 n_latents=1,
                 vis_dim=4096,
@@ -170,22 +188,35 @@ def _make_action_decoder_cls(map_block_cls: type[nn.Module] = _MAPBlock):
                 embed_dim=hidden_dim,
                 n_heads=hidden_dim // 64,
             )
+            if self.use_wrist:
+                self.wrist_visual_pool = map_block_cls(
+                    n_latents=1,
+                    vis_dim=4096,
+                    embed_dim=hidden_dim,
+                    n_heads=hidden_dim // 64,
+                )
+                self.wrist_fusion_gate = nn.Parameter(torch.zeros(()))
+            proj_in_dim = hidden_dim
             if self.use_proprio:
                 self.proprio_proj = nn.Sequential(
                     nn.Linear(proprio_dim, hidden_dim),
                     nn.GELU(),
                     nn.Linear(hidden_dim, hidden_dim),
                 )
-                proj_in_dim = hidden_dim * 2
-            else:
-                proj_in_dim = hidden_dim
+                proj_in_dim += hidden_dim
 
             layers: list[nn.Module] = [nn.Linear(proj_in_dim, action_dim * window_size)]
             if output_tanh:
                 layers.append(nn.Tanh())
             self.proj = nn.Sequential(*layers)
 
-        def forward(self, latent_action_tokens: Tensor, visual_embed: Tensor, proprio: Tensor | None = None) -> Tensor:
+        def forward(
+            self,
+            latent_action_tokens: Tensor,
+            visual_embed: Tensor,
+            proprio: Tensor | None = None,
+            wrist_visual_embed: Tensor | None = None,
+        ) -> Tensor:
             visual_embed = self.visual_pool(visual_embed.to(torch.float))
             if latent_action_tokens.shape[1] < self.latent_action_token_len:
                 raise ValueError(
@@ -193,8 +224,16 @@ def _make_action_decoder_cls(map_block_cls: type[nn.Module] = _MAPBlock):
                     f"expected at least {self.latent_action_token_len}, got {latent_action_tokens.shape[1]}."
                 )
             latent_action_tokens = latent_action_tokens[:, -self.latent_action_token_len :].to(torch.float)
+            if self.use_wrist:
+                if wrist_visual_embed is None:
+                    raise ValueError(
+                        "Action decoder checkpoint requires wrist visual tokens, but no wrist image was provided."
+                    )
+                wrist_embed = self.wrist_visual_pool(wrist_visual_embed.to(torch.float))
+                visual_embed = visual_embed + self.wrist_fusion_gate * wrist_embed
             action_token = self.latent_action_pool(latent_action_tokens, init_embed=visual_embed)
 
+            fused_tokens = [action_token]
             if self.use_proprio:
                 if proprio is None:
                     proprio = torch.zeros(
@@ -204,9 +243,9 @@ def _make_action_decoder_cls(map_block_cls: type[nn.Module] = _MAPBlock):
                         dtype=torch.float32,
                     )
                 proprio_embed = self.proprio_proj(proprio.to(device=latent_action_tokens.device, dtype=torch.float32))
-                action_token = torch.cat([action_token, proprio_embed], dim=-1)
+                fused_tokens.append(proprio_embed)
 
-            return self.proj(action_token)
+            return self.proj(torch.cat(fused_tokens, dim=-1))
 
     return UniVLAActionDecoder
 
@@ -227,10 +266,22 @@ class UniVLAPolicy(PreTrainedPolicy):
         self._proprio_std: Tensor | None = None
         self._hf_dtype = _torch_dtype(self.config.torch_dtype)
         self._action_decoder_uses_proprio = False
+        self._action_decoder_uses_wrist = False
+        self._resolved_vla_path: str | None = None
+        self._resolved_dataset_statistics_path: str | None = None
+        self._resolved_action_decoder_path: str | None = None
         self.vla = None
         self.processor = None
         self.action_decoder = None
+        self._debug_calls = 0
         self.register_buffer("_device_anchor", torch.zeros(1), persistent=False)
+
+        do_sample_override = _env_bool("UNIVLA_DO_SAMPLE")
+        if do_sample_override is not None:
+            self.config.do_sample = do_sample_override
+        if _env_bool("UNIVLA_DISABLE_HISTORY_ACTION"):
+            self.config.use_history_action = False
+            self._prev_hist_action = [""]
 
         if not self.config.dummy:
             self._load_real_components()
@@ -252,9 +303,20 @@ class UniVLAPolicy(PreTrainedPolicy):
         **kwargs: Any,
     ) -> "UniVLAPolicy":
         del strict
+        artifact_dir = cls._resolve_pretrained_artifact_dir(
+            pretrained_name_or_path,
+            force_download=force_download,
+            resume_download=resume_download,
+            proxies=proxies,
+            token=token,
+            cache_dir=cache_dir,
+            local_files_only=local_files_only,
+            revision=revision,
+        )
+        config_source = artifact_dir if artifact_dir is not None else pretrained_name_or_path
         if config is None:
             config = PreTrainedConfig.from_pretrained(
-                pretrained_name_or_path=pretrained_name_or_path,
+                pretrained_name_or_path=config_source,
                 force_download=force_download,
                 resume_download=resume_download,
                 proxies=proxies,
@@ -266,11 +328,67 @@ class UniVLAPolicy(PreTrainedPolicy):
             )
         if not isinstance(config, UniVLAConfig):
             raise TypeError(f"Expected UniVLAConfig, got {type(config)}")
+        if artifact_dir is not None:
+            setattr(config, "_artifact_dir", str(artifact_dir))
 
         policy = cls(config)
         policy.to(config.device)
         policy.eval()
         return policy
+
+    @staticmethod
+    def _resolve_pretrained_artifact_dir(
+        pretrained_name_or_path: str | Path,
+        *,
+        force_download: bool = False,
+        resume_download: bool | None = None,
+        proxies: dict | None = None,
+        token: str | bool | None = None,
+        cache_dir: str | Path | None = None,
+        local_files_only: bool = False,
+        revision: str | None = None,
+    ) -> Path | None:
+        model_id = str(pretrained_name_or_path)
+        path = Path(model_id)
+        if path.is_dir():
+            return path.resolve()
+
+        from huggingface_hub import snapshot_download
+
+        return Path(
+            snapshot_download(
+                repo_id=model_id,
+                revision=revision,
+                cache_dir=cache_dir,
+                force_download=force_download,
+                proxies=proxies,
+                resume_download=resume_download,
+                token=token,
+                local_files_only=local_files_only,
+            )
+        )
+
+    def _artifact_dir(self) -> Path | None:
+        artifact_dir = getattr(self.config, "_artifact_dir", None)
+        if not artifact_dir:
+            return None
+        return Path(str(artifact_dir))
+
+    def _resolve_artifact_path(self, value: str | None) -> str | None:
+        if not value:
+            return value
+        path = Path(value)
+        if path.is_absolute():
+            return str(path)
+
+        artifact_dir = self._artifact_dir()
+        if artifact_dir is not None:
+            candidate = artifact_dir / value
+            if candidate.exists():
+                return str(candidate)
+        if path.exists():
+            return str(path)
+        return value
 
     def _load_real_components(self) -> None:
         missing = []
@@ -286,9 +404,10 @@ class UniVLAPolicy(PreTrainedPolicy):
             )
         AutoModelForVision2Seq, AutoProcessor = self._register_hf_classes()
         device = torch.device(self.config.device)
+        self._resolved_vla_path = self._resolve_artifact_path(self.config.vla_path)
 
         self.vla = AutoModelForVision2Seq.from_pretrained(
-            self.config.vla_path,
+            self._resolved_vla_path,
             attn_implementation=self.config.attn_implementation,
             torch_dtype=self._hf_dtype,
             load_in_8bit=self.config.load_in_8bit,
@@ -297,11 +416,16 @@ class UniVLAPolicy(PreTrainedPolicy):
             trust_remote_code=self.config.trust_remote_code,
         )
         self.vla.config.latent_action_token_len = self.config.latent_action_token_len
+        self.vla.config.action_vocab_size = self.config.action_vocab_size
+        self.vla.config.action_token_mask = self.config.action_token_mask
+        self.vla.config.action_token_id_offset = self.config.action_token_id_offset
+        self.vla.config.radius_action_vocab_size = self.config.radius_action_vocab_size
+        self.vla.config.direction_action_vocab_size = self.config.direction_action_vocab_size
         self.vla.to(device)
         self.vla.eval()
 
         self.processor = AutoProcessor.from_pretrained(
-            self.config.vla_path,
+            self._resolved_vla_path,
             trust_remote_code=self.config.trust_remote_code,
         )
 
@@ -348,13 +472,14 @@ class UniVLAPolicy(PreTrainedPolicy):
         return AutoModelForVision2Seq, AutoProcessor
 
     def _load_dataset_statistics(self) -> dict[str, Any]:
-        stats_path = self.config.dataset_statistics_path
-        if not stats_path and self.config.vla_path:
-            candidate = Path(self.config.vla_path) / "dataset_statistics.json"
+        stats_path = self._resolve_artifact_path(self.config.dataset_statistics_path)
+        if not stats_path and self._resolved_vla_path:
+            candidate = Path(self._resolved_vla_path) / "dataset_statistics.json"
             if candidate.exists():
                 stats_path = str(candidate)
         if not stats_path:
             return {}
+        self._resolved_dataset_statistics_path = stats_path
         with open(stats_path, "r") as f:
             return json.load(f)
 
@@ -378,9 +503,27 @@ class UniVLAPolicy(PreTrainedPolicy):
         self._proprio_std = torch.clamp(std, min=1e-2)
 
     def _load_action_decoder(self, device: torch.device) -> nn.Module:
-        payload = torch.load(self.config.action_decoder_path, map_location="cpu")
+        action_decoder_path = self._resolve_artifact_path(self.config.action_decoder_path)
+        self._resolved_action_decoder_path = action_decoder_path
+        payload = torch.load(action_decoder_path, map_location="cpu")
         state_dict = _extract_state_dict(payload)
+        if any(key.startswith("wrist_pool.") for key in state_dict):
+            state_dict = {
+                ("wrist_visual_pool." + key[len("wrist_pool.") :]) if key.startswith("wrist_pool.") else key: value
+                for key, value in state_dict.items()
+            }
         uses_proprio = any(key.startswith("proprio_proj.") for key in state_dict)
+        uses_wrist = any(key == "wrist_fusion_gate" or key.startswith("wrist_visual_pool.") for key in state_dict)
+        if uses_wrist and not self.config.wrist_fusion_enabled():
+            raise ValueError(
+                "Action decoder checkpoint has wrist fusion weights, but UniVLAConfig.wrist_fusion is 'none'. "
+                "Re-export the policy with --wrist-fusion decoder_residual."
+            )
+        if self.config.wrist_fusion_enabled() and not uses_wrist:
+            raise ValueError(
+                f"UniVLAConfig(wrist_fusion={self.config.wrist_fusion!r}) requires an action decoder checkpoint "
+                "with wrist_visual_pool weights, but none were found."
+            )
         proj_weight = state_dict.get("proj.0.weight")
         if proj_weight is None:
             raise KeyError(
@@ -394,7 +537,14 @@ class UniVLAPolicy(PreTrainedPolicy):
                 f"checkpoint proj.0.weight[0]={proj_weight.shape[0]}, expected {expected_out} "
                 f"(action_dim={self.config.action_dim}, window_size={self.config.window_size})."
             )
-        hidden_dim = int(proj_weight.shape[1] // 2) if uses_proprio else int(proj_weight.shape[1])
+        hidden_chunks = 1 + int(uses_proprio)
+        if int(proj_weight.shape[1]) % hidden_chunks != 0:
+            raise ValueError(
+                "Action decoder input shape does not match detected fusion modules: "
+                f"proj.0.weight[1]={proj_weight.shape[1]}, hidden_chunks={hidden_chunks}, "
+                f"uses_wrist={uses_wrist}, uses_proprio={uses_proprio}."
+            )
+        hidden_dim = int(proj_weight.shape[1] // hidden_chunks)
         decoder_cls = _make_action_decoder_cls()
         decoder = decoder_cls(
             window_size=self.config.window_size,
@@ -403,11 +553,13 @@ class UniVLAPolicy(PreTrainedPolicy):
             latent_action_token_len=self.config.latent_action_token_len,
             proprio_dim=self.config.state_dim,
             use_proprio=uses_proprio,
+            use_wrist=uses_wrist,
             output_tanh=self.config.decoder_output_tanh,
         )
         decoder.load_state_dict(state_dict, strict=True)
         decoder.to(device)
         self._action_decoder_uses_proprio = uses_proprio
+        self._action_decoder_uses_wrist = uses_wrist
         return decoder
 
     def get_optim_params(self) -> dict[str, list[nn.Parameter]]:
@@ -417,6 +569,22 @@ class UniVLAPolicy(PreTrainedPolicy):
         self._queued_actions.clear()
         self._prev_hist_action = [""]
 
+    def _debug_enabled(self) -> bool:
+        value = os.environ.get("UNIVLA_DEBUG", "")
+        if value.lower() not in {"1", "true", "yes", "on"}:
+            return False
+        max_calls = int(os.environ.get("UNIVLA_DEBUG_MAX_CALLS", "20"))
+        return self._debug_calls < max_calls
+
+    @staticmethod
+    def _tensor_summary(tensor: Tensor) -> str:
+        data = tensor.detach().float().cpu()
+        return (
+            f"shape={tuple(data.shape)} min={data.min().item():.6g} "
+            f"max={data.max().item():.6g} mean={data.mean().item():.6g} "
+            f"std={data.std(unbiased=False).item():.6g}"
+        )
+
     def forward(self, batch: dict[str, Tensor]) -> tuple[Tensor, dict[str, float]]:
         chunk = self.predict_action_chunk(batch)
         loss = chunk.sum() * 0.0
@@ -424,7 +592,7 @@ class UniVLAPolicy(PreTrainedPolicy):
 
     def _batch_size_and_device(self, batch: dict[str, Any]) -> tuple[int, torch.device, torch.dtype]:
         candidates = []
-        for key in [self.config.state_key, self.config.image_key, *self.config.fallback_image_keys]:
+        for key in [self.config.state_key, self.config.image_key, self.config.wrist_image_key, *self.config.fallback_image_keys]:
             value = batch.get(key)
             if isinstance(value, Tensor):
                 candidates.append(value)
@@ -457,11 +625,52 @@ class UniVLAPolicy(PreTrainedPolicy):
         if self.vla is None or self.processor is None or self.action_decoder is None:
             raise RuntimeError("UniVLA real components are not loaded.")
 
+        debug = self._debug_enabled()
+        if debug:
+            available = sorted(key for key, value in batch.items() if key.startswith("observation.") and isinstance(value, Tensor))
+            print(f"[univla-debug] call={self._debug_calls} available_tensor_keys={available}")
+            print(
+                "[univla-debug] config "
+                f"image_key={self.config.image_key} state_key={self.config.state_key} "
+                f"dataset_name={self._dataset_name} latent_action_token_len={self.config.latent_action_token_len} "
+                f"n_action_steps={self.config.n_action_steps} use_history_action={self.config.use_history_action} "
+                f"wrist_fusion={self.config.wrist_fusion} decoder_uses_wrist={self._action_decoder_uses_wrist}"
+            )
+            print(
+                "[univla-debug] resolved_paths "
+                f"vla={self._resolved_vla_path} "
+                f"action_decoder={self._resolved_action_decoder_path} "
+                f"dataset_statistics={self._resolved_dataset_statistics_path}"
+            )
+
         image_tensor = self._get_image_tensor(batch)
         if image_tensor.ndim == 3:
             image_tensor = image_tensor.unsqueeze(0)
         if image_tensor.ndim != 4:
             raise ValueError(f"Expected image tensor shape (B,C,H,W) or (C,H,W), got {tuple(image_tensor.shape)}")
+        if debug:
+            print(f"[univla-debug] image {self._tensor_summary(image_tensor)}")
+            state_value = batch.get(self.config.state_key)
+            if isinstance(state_value, Tensor):
+                print(f"[univla-debug] state_raw {self._tensor_summary(state_value)}")
+            else:
+                print(f"[univla-debug] state_raw missing_or_non_tensor type={type(state_value).__name__}")
+
+        wrist_tensor = self._get_wrist_image_tensor(batch) if self._action_decoder_uses_wrist else None
+        if wrist_tensor is not None:
+            if wrist_tensor.ndim == 3:
+                wrist_tensor = wrist_tensor.unsqueeze(0)
+            if wrist_tensor.ndim != 4:
+                raise ValueError(
+                    f"Expected wrist image tensor shape (B,C,H,W) or (C,H,W), got {tuple(wrist_tensor.shape)}"
+                )
+            if wrist_tensor.shape[0] != image_tensor.shape[0]:
+                raise ValueError(
+                    "Primary and wrist image batch sizes must match: "
+                    f"primary={image_tensor.shape[0]}, wrist={wrist_tensor.shape[0]}."
+                )
+            if debug:
+                print(f"[univla-debug] wrist_image {self._tensor_summary(wrist_tensor)}")
 
         chunks = []
         for index in range(int(image_tensor.shape[0])):
@@ -477,11 +686,47 @@ class UniVLAPolicy(PreTrainedPolicy):
                     temperature=self.config.temperature,
                     top_p=self.config.top_p,
                 )
+                wrist_visual_embed = None
+                if wrist_tensor is not None:
+                    wrist_image = self._tensor_to_pil(wrist_tensor[index])
+                    wrist_inputs = self.processor(prompt, wrist_image).to(
+                        self._device_anchor.device,
+                        dtype=self._hf_dtype,
+                    )
+                    wrist_visual_embed = self._project_visual_tokens(wrist_inputs["pixel_values"])
                 proprio = self._get_proprio(batch, index, latent_action.device)
-                action = self.action_decoder(latent_action, visual_embed, proprio)
+                action = self.action_decoder(
+                    latent_action,
+                    visual_embed,
+                    proprio,
+                    wrist_visual_embed=wrist_visual_embed,
+                )
                 chunk = action.reshape(1, self.config.window_size, self.config.action_dim)
+            if debug:
+                token_ids = generated_ids[0].detach().cpu().tolist()
+                offset = int(self.config.action_token_id_offset)
+                action_token_ids = [
+                    int(token_id) - offset
+                    for token_id in token_ids
+                    if 0 <= int(token_id) - offset < self.config.action_vocab_size
+                ]
+                print(f"[univla-debug] task={task!r}")
+                print(f"[univla-debug] generated_action_tokens={action_token_ids}")
+                if proprio is None:
+                    print("[univla-debug] proprio=None")
+                else:
+                    print(f"[univla-debug] proprio_normed {self._tensor_summary(proprio)}")
+                if wrist_visual_embed is not None:
+                    print(f"[univla-debug] wrist_visual_embed {self._tensor_summary(wrist_visual_embed)}")
+                print(f"[univla-debug] action_normed_chunk {self._tensor_summary(chunk)}")
+                print(
+                    "[univla-debug] action_normed_first="
+                    + np.array2string(chunk[0, 0].detach().float().cpu().numpy(), precision=5, separator=", ")
+                )
             self._remember_generated_actions(generated_ids)
             chunks.append(chunk)
+        if debug:
+            self._debug_calls += 1
         return torch.cat(chunks, dim=0)
 
     def _get_image_tensor(self, batch: dict[str, Any]) -> Tensor:
@@ -494,6 +739,48 @@ class UniVLAPolicy(PreTrainedPolicy):
             f"Could not find UniVLA image key {self.config.image_key!r}. "
             f"Fallback keys={self.config.fallback_image_keys}; available tensor observation keys={available}."
         )
+
+    def _wrist_image_key_candidates(self) -> list[str]:
+        candidates = [
+            self.config.wrist_image_key,
+            "observation.images.wrist",
+            "observation.images.wrist_image",
+            "observation.images.hand",
+            "observation.images.gripper",
+        ]
+        candidates.extend(
+            key
+            for key, feature in self.config.input_features.items()
+            if feature.type is FeatureType.VISUAL and any(part in key.lower() for part in ("wrist", "hand", "gripper"))
+        )
+        return list(dict.fromkeys(candidates))
+
+    def _get_wrist_image_tensor(self, batch: dict[str, Any]) -> Tensor:
+        for key in self._wrist_image_key_candidates():
+            value = batch.get(key)
+            if isinstance(value, Tensor):
+                return value
+        available = [key for key, value in batch.items() if key.startswith("observation.") and isinstance(value, Tensor)]
+        raise KeyError(
+            "Action decoder checkpoint requires wrist visual input, but no wrist image tensor was found. "
+            f"Configured wrist_image_key={self.config.wrist_image_key!r}; "
+            f"candidate keys={self._wrist_image_key_candidates()}; available tensor observation keys={available}."
+        )
+
+    def _vla_attr(self, name: str) -> Any:
+        if self.vla is None:
+            raise RuntimeError("UniVLA real components are not loaded.")
+        try:
+            return getattr(self.vla, name)
+        except AttributeError:
+            if hasattr(self.vla, "get_base_model"):
+                return getattr(self.vla.get_base_model(), name)
+            raise
+
+    def _project_visual_tokens(self, pixel_values: Tensor | dict[str, Tensor]) -> Tensor:
+        vision_backbone = self._vla_attr("vision_backbone")
+        projector = self._vla_attr("projector")
+        return projector(vision_backbone(pixel_values))
 
     def _get_task(self, batch: dict[str, Any], index: int) -> str:
         value = batch.get(self.config.task_key, batch.get("task"))
@@ -510,6 +797,8 @@ class UniVLAPolicy(PreTrainedPolicy):
             return None
         value = batch.get(self.config.state_key)
         if value is None:
+            if self._debug_enabled():
+                print(f"[univla-debug] missing {self.config.state_key}; using zero proprio")
             return torch.zeros(1, self.config.state_dim, device=device, dtype=torch.float32)
         if not isinstance(value, Tensor):
             value = torch.tensor(value, dtype=torch.float32)
@@ -545,8 +834,9 @@ class UniVLAPolicy(PreTrainedPolicy):
         if not self.config.use_history_action:
             return
         pieces = []
+        offset = int(self.config.action_token_id_offset)
         for token_id in generated_ids[0].detach().cpu().tolist():
-            action_idx = int(token_id) - 32001
+            action_idx = int(token_id) - offset
             if 0 <= action_idx < self.config.action_vocab_size:
                 pieces.append(f"<ACT_{action_idx}>")
         self._prev_hist_action.append("".join(pieces))

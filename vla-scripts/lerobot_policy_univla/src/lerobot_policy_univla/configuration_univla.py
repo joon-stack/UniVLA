@@ -5,8 +5,16 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-from lerobot.configs import FeatureType, NormalizationMode, PolicyFeature, PreTrainedConfig
-from lerobot.optim import AdamWConfig
+try:
+    from lerobot.configs import FeatureType, NormalizationMode, PolicyFeature, PreTrainedConfig
+except ImportError:
+    from lerobot.configs.policies import PreTrainedConfig
+    from lerobot.configs.types import FeatureType, NormalizationMode, PolicyFeature
+
+try:
+    from lerobot.optim import AdamWConfig
+except ImportError:
+    from lerobot.optim.optimizers import AdamWConfig
 from lerobot.utils.constants import ACTION, OBS_STATE
 
 
@@ -41,6 +49,7 @@ class UniVLAConfig(PreTrainedConfig):
     image_resolution: tuple[int, int] = (224, 224)
 
     image_key: str = "observation.images.primary"
+    wrist_image_key: str = "observation.images.wrist"
     state_key: str = OBS_STATE
     task_key: str = "task"
     fallback_image_keys: list[str] = field(
@@ -65,9 +74,14 @@ class UniVLAConfig(PreTrainedConfig):
     load_in_8bit: bool = False
     load_in_4bit: bool = False
     use_proprio: bool = True
+    wrist_fusion: str = "none"
     decoder_output_tanh: bool = True
     use_history_action: bool = True
     action_vocab_size: int = 32
+    action_token_mask: str = "none"
+    action_token_id_offset: int = 32001
+    radius_action_vocab_size: int = 16
+    direction_action_vocab_size: int = 16
 
     normalization_mapping: dict[str, NormalizationMode] = field(
         default_factory=lambda: {
@@ -88,6 +102,7 @@ class UniVLAConfig(PreTrainedConfig):
             raise ValueError(
                 f"n_action_steps must be <= window_size, got {self.n_action_steps} > {self.window_size}."
             )
+        self.wrist_fusion = self._normalize_wrist_fusion(self.wrist_fusion)
         self.validate_features()
 
     def get_optimizer_preset(self) -> AdamWConfig:
@@ -106,17 +121,47 @@ class UniVLAConfig(PreTrainedConfig):
             self.output_features[ACTION] = PolicyFeature(FeatureType.ACTION, (self.action_dim,))
 
         visual_keys = [key for key, feature in self.input_features.items() if feature.type is FeatureType.VISUAL]
-        if visual_keys and self.image_key not in self.input_features:
-            self.image_key = visual_keys[0]
-        elif not visual_keys:
+        primary_visual_keys = [key for key in visual_keys if key != self.wrist_image_key]
+        if primary_visual_keys and self.image_key not in self.input_features:
+            self.image_key = primary_visual_keys[0]
+        elif not primary_visual_keys and self.image_key not in self.input_features:
             channels = 3
             height, width = self.image_resolution
             self.input_features[self.image_key] = PolicyFeature(FeatureType.VISUAL, (channels, height, width))
+
+        if self.wrist_fusion_enabled() and self.wrist_image_key not in self.input_features:
+            primary_feature = self.input_features[self.image_key]
+            self.input_features[self.wrist_image_key] = PolicyFeature(FeatureType.VISUAL, primary_feature.shape)
 
         if self.state_key in self.input_features:
             self.state_dim = self.input_features[self.state_key].shape[-1]
         elif self.state_dim > 0:
             self.input_features[self.state_key] = PolicyFeature(FeatureType.STATE, (self.state_dim,))
+
+    @staticmethod
+    def _normalize_wrist_fusion(value: str | bool | None) -> str:
+        if isinstance(value, bool):
+            return "decoder_residual" if value else "none"
+        mode = str(value or "none").strip().lower()
+        aliases = {
+            "0": "none",
+            "false": "none",
+            "off": "none",
+            "no": "none",
+            "1": "decoder_residual",
+            "true": "decoder_residual",
+            "on": "decoder_residual",
+            "yes": "decoder_residual",
+            "late": "decoder_residual",
+            "decoder_late": "decoder_residual",
+        }
+        mode = aliases.get(mode, mode)
+        if mode not in {"none", "decoder_residual"}:
+            raise ValueError(f"Unsupported wrist_fusion={value!r}. Use 'none' or 'decoder_residual'.")
+        return mode
+
+    def wrist_fusion_enabled(self) -> bool:
+        return self._normalize_wrist_fusion(self.wrist_fusion) != "none"
 
     @property
     def observation_delta_indices(self) -> None:

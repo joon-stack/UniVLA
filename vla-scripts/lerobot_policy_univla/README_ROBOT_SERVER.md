@@ -131,11 +131,12 @@ $LEROBOT_PY vla-scripts/lerobot_policy_univla/export_univla_policy_artifact.py \
   --task-key task \
   --window-size 10 \
   --n-action-steps 10 \
-  --latent-action-token-len 4 \
+  --latent-action-token-len 5 \
   --device cuda
 ```
 
 `dataset_statistics.json` 안에 dataset key가 여러 개 있으면 `--dataset-name`은 반드시 그중 하나와 정확히 맞아야 합니다.
+`--latent-action-token-len`은 checkpoint와 맞아야 합니다. hfrad/euclidean-5token은 `5`, UniVLA stage2는 `4`입니다. 생략하면 `vla_path/config.json` 또는 `eval_meta.json`에서 자동 추론합니다.
 
 생성된 `/path/to/outputs/univla_lerobot_policy_real` 폴더에는 다음이 저장됩니다.
 

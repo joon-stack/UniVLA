@@ -14,9 +14,11 @@ from lerobot.processor import (
     PolicyProcessorPipeline,
     RenameObservationsProcessorStep,
     UnnormalizerProcessorStep,
-    policy_action_to_transition,
-    transition_to_policy_action,
 )
+try:
+    from lerobot.processor import policy_action_to_transition, transition_to_policy_action
+except ImportError:
+    from lerobot.processor.converters import policy_action_to_transition, transition_to_policy_action
 from lerobot.utils.constants import POLICY_POSTPROCESSOR_DEFAULT_NAME, POLICY_PREPROCESSOR_DEFAULT_NAME
 
 from .configuration_univla import UniVLAConfig
